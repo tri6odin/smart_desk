@@ -2,11 +2,13 @@
 #include <atomic>
 #include <cstdint>
 
+#include "desk_controller.hpp"
 #include "desk_protocol.hpp"
 #include "ble_hid_logger.hpp"
 #include "driver/gpio.h"
 #include "driver/uart.h"
 #include "esp_log.h"
+#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
 #include "nvs.h"
@@ -54,6 +56,30 @@ std::atomic<TickType_t> g_height_tick{0};
 std::atomic<bool> g_have_height{false};
 std::atomic<std::uint32_t> g_consistent_height_frames{0};
 std::atomic<std::uint32_t> g_anomaly_sequence{0};
+#if CONFIG_DESK_MODE_BLE_CONTROLLER
+portMUX_TYPE g_telemetry_mux = portMUX_INITIALIZER_UNLOCKED;
+
+struct TelemetrySnapshot {
+    std::uint16_t height_tenths_cm;
+    TickType_t tick;
+    bool have_height;
+    std::uint32_t consistent_frames;
+    std::uint32_t anomaly_sequence;
+};
+
+TelemetrySnapshot read_telemetry() {
+    portENTER_CRITICAL(&g_telemetry_mux);
+    const TelemetrySnapshot snapshot{
+        g_height_tenths_cm.load(),
+        g_height_tick.load(),
+        g_have_height.load(),
+        g_consistent_height_frames.load(),
+        g_anomaly_sequence.load(),
+    };
+    portEXIT_CRITICAL(&g_telemetry_mux);
+    return snapshot;
+}
+#endif
 #endif
 
 #if CONFIG_DESK_MODE_STEP_DOWN_TEST
@@ -103,10 +129,23 @@ enum class ControllerRequest : int {
     kSaveStand,
 };
 
-std::atomic<std::uint32_t> g_ble_raw_sequence{0};
-std::atomic<int> g_ble_raw_direction{0};
-std::atomic<TickType_t> g_ble_raw_tick{0};
+struct BleDialSnapshot {
+    std::uint32_t sequence = 0;
+    int direction = 0;
+    TickType_t tick = 0;
+};
+
+portMUX_TYPE g_ble_dial_mux = portMUX_INITIALIZER_UNLOCKED;
+BleDialSnapshot g_ble_dial;
 std::atomic<ControllerRequest> g_controller_request{ControllerRequest::kNone};
+std::atomic<std::uint32_t> g_panel_heartbeat{0};
+
+BleDialSnapshot read_ble_dial() {
+    portENTER_CRITICAL(&g_ble_dial_mux);
+    const BleDialSnapshot snapshot = g_ble_dial;
+    portEXIT_CRITICAL(&g_ble_dial_mux);
+    return snapshot;
+}
 #endif
 
 void ble_motion_action(const BleHidAction& action, void*) {
@@ -115,9 +154,12 @@ void ble_motion_action(const BleHidAction& action, void*) {
 #if CONFIG_DESK_MODE_BLE_CALIBRATION
             g_ble_last_raw_tick.store(xTaskGetTickCount());
 #elif CONFIG_DESK_MODE_BLE_CONTROLLER
-            g_ble_raw_tick.store(xTaskGetTickCount());
-            g_ble_raw_direction.store(action.value);
-            g_ble_raw_sequence.fetch_add(1);
+            const TickType_t tick = xTaskGetTickCount();
+            portENTER_CRITICAL(&g_ble_dial_mux);
+            g_ble_dial.tick = tick;
+            g_ble_dial.direction = action.value;
+            ++g_ble_dial.sequence;
+            portEXIT_CRITICAL(&g_ble_dial_mux);
 #endif
             const int active_direction = g_ble_active_direction.load();
             if (active_direction != 0 && action.value != active_direction) {
@@ -252,6 +294,9 @@ void reader_task(void* raw_config) {
                     normal_status && message->flags == 0x00 &&
                     message->height_tenths_cm >= 700 &&
                     message->height_tenths_cm <= 1300;
+#if CONFIG_DESK_MODE_BLE_CONTROLLER
+                portENTER_CRITICAL(&g_telemetry_mux);
+#endif
                 if (normal_height) {
                     const std::uint16_t previous_height =
                         g_height_tenths_cm.load();
@@ -277,6 +322,9 @@ void reader_task(void* raw_config) {
                     g_consistent_height_frames.store(0);
                     g_anomaly_sequence.fetch_add(1);
                 }
+#if CONFIG_DESK_MODE_BLE_CONTROLLER
+                portEXIT_CRITICAL(&g_telemetry_mux);
+#endif
             }
 #endif
 
@@ -421,72 +469,19 @@ void panel_writer_task(void*) {
     std::uint32_t start_anomaly_sequence = 0;
 #endif
 #if CONFIG_DESK_MODE_BLE_CONTROLLER
-    const auto down_step =
-        smart_desk::make_panel_frame(smart_desk::Command::kDownStep);
-    const auto up_step =
-        smart_desk::make_panel_frame(smart_desk::Command::kUpStep);
-    const auto down_hold =
-        smart_desk::make_panel_frame(smart_desk::Command::kDownHold);
-    const auto up_hold =
-        smart_desk::make_panel_frame(smart_desk::Command::kUpHold);
-    enum class ProductionState {
-        kIdle,
-        kDialClassify,
-        kManualStep,
-        kManualHold,
-        kPresetHold,
-        kSettling,
-    };
     constexpr std::uint32_t kProductionSettledFrames = 5;
-    // The D100H can leave gaps of roughly 270 ms between report groups even
-    // while the wheel is still being turned. Keep the lease above that gap;
-    // this remains a short live-input lease, never a movement queue.
-    constexpr TickType_t kManualHoldRelease = pdMS_TO_TICKS(350);
-    // One slow physical click can produce two Consumer Control press reports
-    // on this D100H.  The first report still starts STEP immediately, but only
-    // a continuing stream of at least four reports may escalate it to HOLD.
-    constexpr std::uint32_t kHoldEscalationReports = 4;
-    // One UART slot is enough for the D100H to distinguish a slow detent
-    // (normally at most two reports) from continuous rotation (at least four).
-    // Classify before sending anything so the power board never sees a STEP
-    // changed into HOLD while the autonomous STEP is already running.
-    constexpr TickType_t kDialClassifyWindow = pdMS_TO_TICKS(100);
-    // A later detent after the autonomous 1 cm STEP has actually settled is a
-    // new STEP, not permission to turn it into a continuous HOLD.
-    constexpr TickType_t kStepCompletionMin = pdMS_TO_TICKS(500);
-    // J8 height telemetry is deliberately noisy while both columns start and
-    // can oscillate for more than a second before its directional envelope
-    // moves.  A real standstill is still bounded, but must not be inferred
-    // from a single 0.7 s flat part of that sawtooth.
-    constexpr TickType_t kMotionStartGrace = pdMS_TO_TICKS(2500);
-    constexpr TickType_t kMotionStall = pdMS_TO_TICKS(2000);
-    constexpr TickType_t kPresetMaxRun = pdMS_TO_TICKS(20000);
-    constexpr TickType_t kManualMaxRun = pdMS_TO_TICKS(30000);
-    constexpr TickType_t kSettleMin = pdMS_TO_TICKS(1500);
-    constexpr TickType_t kSettleNoMotion = pdMS_TO_TICKS(3000);
-    constexpr TickType_t kSettleWatchdog = pdMS_TO_TICKS(7000);
-    constexpr TickType_t kRearmQuiet = pdMS_TO_TICKS(500);
-    // Short UP runs coasted 1.1..1.3 cm, but a full 81->115 cm preset run
-    // coasted 2.0..2.2 cm.  Use the long-run worst case plus margin so the
-    // software maximum is never deliberately crossed. DOWN measured 1.8..1.9.
-    constexpr std::uint16_t kUpBoundaryCoastTenthsCm = 25;
-    constexpr std::uint16_t kDownBoundaryCoastTenthsCm = 20;
-
     DeskPresets presets = load_presets();
-    ProductionState production_state = ProductionState::kIdle;
-    std::uint32_t consumed_raw_sequence = g_ble_raw_sequence.load();
-    std::uint32_t gesture_event_count = 0;
-    int direction = 0;
-    std::uint16_t start_height = 0;
-    std::uint16_t target_height = 0;
-    std::uint16_t progress_height = 0;
-    TickType_t motion_start_tick = 0;
-    TickType_t progress_tick = 0;
-    TickType_t settle_start_tick = 0;
-    bool have_progress = false;
-    bool moved = false;
-    bool allow_hold_escalation = true;
-    std::uint32_t start_anomaly_sequence = 0;
+    smart_desk::ControllerConfig controller_config;
+    controller_config.sit_tenths_cm = presets.sit;
+    controller_config.stand_tenths_cm = presets.stand;
+    smart_desk::DeskController controller(controller_config);
+
+    // Ignore any BLE reports received while this task was being created.
+    smart_desk::ControllerInput initial_input;
+    initial_input.dial_sequence = read_ble_dial().sequence;
+    initial_input.stop_requested = true;
+    controller.update(initial_input);
+    smart_desk::ControlState logged_state = controller.state();
 #endif
 #if CONFIG_DESK_MODE_BLE_ONE_SHOT_TEST
     const auto down_hold =
@@ -721,426 +716,107 @@ void panel_writer_task(void*) {
 #endif
 
 #if CONFIG_DESK_MODE_BLE_CONTROLLER
-        const TickType_t control_now = xTaskGetTickCount();
-        const std::uint16_t control_height = g_height_tenths_cm.load();
+        const TickType_t control_now_tick = xTaskGetTickCount();
+        const std::uint32_t control_now_ms =
+            static_cast<std::uint32_t>(control_now_tick) * portTICK_PERIOD_MS;
+        const TelemetrySnapshot telemetry = read_telemetry();
+        const BleDialSnapshot dial = read_ble_dial();
+        const std::uint16_t control_height = telemetry.height_tenths_cm;
         const bool control_fresh =
-            g_have_height.load() &&
-            control_now - g_height_tick.load() <= kBleTelemetryMaxAge;
+            telemetry.have_height &&
+            control_now_tick - telemetry.tick <= kBleTelemetryMaxAge;
         const bool control_settled =
-            g_consistent_height_frames.load() >= kProductionSettledFrames;
-        const std::uint32_t raw_sequence = g_ble_raw_sequence.load();
-        std::uint32_t new_raw_events =
-            raw_sequence - consumed_raw_sequence;
-        bool have_new_raw = new_raw_events != 0;
-        const int raw_direction = g_ble_raw_direction.load();
-        ControllerRequest request =
+            telemetry.consistent_frames >= kProductionSettledFrames;
+        const ControllerRequest raw_request =
             g_controller_request.exchange(ControllerRequest::kNone);
+        bool stop_requested = g_ble_stop_requested.exchange(false);
 
-        if (production_state != ProductionState::kIdle &&
+        ControllerRequest request = raw_request;
+        if (controller.state() != smart_desk::ControlState::kIdle &&
             request != ControllerRequest::kNone) {
             ESP_LOGW("desk.control",
                      "button during motion -> STOP; action not queued");
-            g_ble_stop_requested.store(true);
+            stop_requested = true;
             request = ControllerRequest::kNone;
         }
 
-        if (production_state == ProductionState::kIdle) {
-            if (g_ble_stop_requested.exchange(false)) {
-                // STOP is latched only until all already received input is
-                // consumed. A fresh, later gesture can start normally.
-                consumed_raw_sequence = raw_sequence;
-            } else if (request == ControllerRequest::kSaveSit ||
-                       request == ControllerRequest::kSaveStand) {
-                if (!control_fresh || !control_settled ||
-                    control_height < kPhysicalMinTenthsCm ||
-                    control_height > kPhysicalMaxTenthsCm) {
-                    ESP_LOGE("desk.control",
-                             "preset save BLOCKED: fresh=%d settled=%d height=%u.%u",
-                             control_fresh, control_settled,
-                             control_height / 10, control_height % 10);
-                } else {
-                    DeskPresets candidate = presets;
-                    if (request == ControllerRequest::kSaveSit) {
-                        candidate.sit = control_height;
-                    } else {
-                        candidate.stand = control_height;
-                    }
-                    if (!valid_presets(candidate)) {
-                        ESP_LOGE("desk.control",
-                                 "preset save BLOCKED: require 70..120 cm and SIT+10<=STAND");
-                    } else if (!save_presets(candidate)) {
-                        ESP_LOGE("desk.control", "preset save failed in NVS");
-                    } else {
-                        presets = candidate;
-                        ESP_LOGW("desk.control",
-                                 "saved SIT/min=%u.%u STAND/max=%u.%u cm",
-                                 presets.sit / 10, presets.sit % 10,
-                                 presets.stand / 10, presets.stand % 10);
-                    }
-                }
-            } else if (request == ControllerRequest::kGoSit ||
-                       request == ControllerRequest::kGoStand) {
-                target_height = request == ControllerRequest::kGoSit
-                                    ? presets.sit
-                                    : presets.stand;
-                const unsigned distance =
-                    control_height >= target_height
-                        ? control_height - target_height
-                        : target_height - control_height;
-                if (!control_fresh || !control_settled ||
-                    control_height < kPhysicalMinTenthsCm ||
-                    control_height > kPhysicalMaxTenthsCm) {
-                    ESP_LOGE("desk.control",
-                             "preset BLOCKED: fresh=%d settled=%d height=%u.%u",
-                             control_fresh, control_settled,
-                             control_height / 10, control_height % 10);
-                } else if (distance <= 10) {
-                    ESP_LOGI("desk.control",
-                             "preset already within 1.0 cm: current=%u.%u target=%u.%u",
-                             control_height / 10, control_height % 10,
-                             target_height / 10, target_height % 10);
-                } else {
-                    direction = target_height > control_height ? 1 : -1;
-                    gesture_event_count = 0;
-                    start_height = control_height;
-                    progress_height = control_height;
-                    motion_start_tick = control_now;
-                    progress_tick = control_now;
-                    have_progress = false;
-                    moved = false;
-                    start_anomaly_sequence = g_anomaly_sequence.load();
-                    g_ble_active_direction.store(direction);
-                    production_state = ProductionState::kPresetHold;
-                    outgoing = direction > 0 ? &up_hold : &down_hold;
-                    ESP_LOGW("desk.control",
-                             "PRESET start: %u.%u -> %u.%u cm dir=%+d",
-                             start_height / 10, start_height % 10,
-                             target_height / 10, target_height % 10,
-                             direction);
-                }
-            } else if (have_new_raw) {
-                consumed_raw_sequence = raw_sequence;
-                const bool valid_direction =
-                    raw_direction == 1 || raw_direction == -1;
-                const bool full_step_inside_limit =
-                    raw_direction > 0
-                        ? static_cast<unsigned>(control_height) + 10U <=
-                              presets.stand
-                        : static_cast<unsigned>(control_height) >=
-                              static_cast<unsigned>(presets.sit) + 10U;
-                if (!valid_direction || !control_fresh || !control_settled ||
-                    control_height < kPhysicalMinTenthsCm ||
-                    control_height > kPhysicalMaxTenthsCm) {
-                    ESP_LOGE("desk.control",
-                             "dial BLOCKED: dir=%d fresh=%d settled=%d height=%u.%u",
-                             raw_direction, control_fresh, control_settled,
-                             control_height / 10, control_height % 10);
-                } else if (!full_step_inside_limit) {
-                    ESP_LOGW("desk.control",
-                             "SOFT LIMIT: blocked dir=%+d at %u.%u (SIT=%u.%u STAND=%u.%u)",
-                             raw_direction, control_height / 10,
-                             control_height % 10, presets.sit / 10,
-                             presets.sit % 10, presets.stand / 10,
-                             presets.stand % 10);
-                } else {
-                    direction = raw_direction;
-                    gesture_event_count = new_raw_events;
-                    start_height = control_height;
-                    target_height = direction > 0 ? presets.stand : presets.sit;
-                    progress_height = control_height;
-                    motion_start_tick = control_now;
-                    progress_tick = control_now;
-                    settle_start_tick = control_now;
-                    have_progress = false;
-                    moved = false;
-                    start_anomaly_sequence = g_anomaly_sequence.load();
-                    g_ble_active_direction.store(direction);
-                    g_ble_stop_requested.store(false);
-                    const std::uint16_t boundary_coast =
-                        direction > 0 ? kUpBoundaryCoastTenthsCm
-                                      : kDownBoundaryCoastTenthsCm;
-                    const std::uint16_t boundary_brake =
-                        direction > 0 ? target_height - boundary_coast
-                                      : target_height + boundary_coast;
-                    const bool inside_boundary_brake_zone =
-                        direction > 0 ? control_height >= boundary_brake
-                                      : control_height <= boundary_brake;
-                    allow_hold_escalation = !inside_boundary_brake_zone;
-                    production_state = ProductionState::kDialClassify;
-                    ESP_LOGW("desk.control",
-                             "DIAL classify dir=%+d reports=%lu at %u.%u cm",
-                             direction,
-                             static_cast<unsigned long>(new_raw_events),
-                             start_height / 10, start_height % 10);
-                }
-                // Do not feed the same snapshot into the newly entered state
-                // below.  It was already consumed by the idle-state decision.
-                have_new_raw = false;
-                new_raw_events = 0;
-            }
-        }
-
-        if (production_state == ProductionState::kDialClassify) {
-            if (have_new_raw) {
-                consumed_raw_sequence = raw_sequence;
-                if (raw_direction != direction) {
-                    g_ble_stop_requested.store(true);
-                } else {
-                    gesture_event_count += new_raw_events;
-                }
-                // This snapshot belongs to classification and must not be
-                // counted again by the state selected below.
-                have_new_raw = false;
-                new_raw_events = 0;
-            }
-
-            const char* cancel_reason = nullptr;
-            if (g_ble_stop_requested.load()) {
-                cancel_reason = "STOP/reversal/disconnect";
-            } else if (!control_fresh || !control_settled) {
-                cancel_reason = "telemetry not ready";
-            } else if (g_anomaly_sequence.load() != start_anomaly_sequence) {
-                cancel_reason = "unexpected controller frame";
-            }
-
-            if (cancel_reason != nullptr) {
-                ESP_LOGW("desk.control", "DIAL cancelled before motion: %s",
-                         cancel_reason);
-                production_state = ProductionState::kIdle;
-                direction = 0;
-                gesture_event_count = 0;
-                g_ble_active_direction.store(0);
-                g_ble_stop_requested.store(false);
-            } else if (control_now - motion_start_tick >=
-                       kDialClassifyWindow) {
-                // The desk has not been commanded yet, so refresh the motion
-                // baseline at the exact slot in which STEP or HOLD starts.
-                start_height = control_height;
-                progress_height = control_height;
-                motion_start_tick = control_now;
-                progress_tick = control_now;
-                have_progress = false;
-                moved = false;
-                start_anomaly_sequence = g_anomaly_sequence.load();
-
-                if (allow_hold_escalation &&
-                    gesture_event_count >= kHoldEscalationReports) {
-                    production_state = ProductionState::kManualHold;
-                    outgoing = direction > 0 ? &up_hold : &down_hold;
-                    ESP_LOGW("desk.control",
-                             "DIAL classified HOLD dir=%+d reports=%lu latency~100ms",
-                             direction,
-                             static_cast<unsigned long>(gesture_event_count));
-                } else {
-                    production_state = ProductionState::kManualStep;
-                    outgoing = direction > 0 ? &up_step : &down_step;
-                    ESP_LOGW("desk.control",
-                             "DIAL classified STEP dir=%+d reports=%lu latency~100ms%s",
-                             direction,
-                             static_cast<unsigned long>(gesture_event_count),
-                             allow_hold_escalation
-                                 ? ""
-                                 : " (HOLD suppressed near limit)");
-                }
-            }
-        }
-
-        if (production_state == ProductionState::kManualStep) {
-            // The dual-column telemetry can initially move up to 0.5 cm in
-            // the opposite direction. Any change from the stable start still
-            // proves that the autonomous STEP started; directional progress
-            // remains tracked separately for the final delta.
-            if (control_height != start_height) {
-                have_progress = true;
-                moved = true;
-            }
-            const bool progressed = direction > 0
-                                        ? control_height > progress_height
-                                        : control_height < progress_height;
-            if (progressed) {
-                progress_height = control_height;
-                progress_tick = control_now;
-                have_progress = true;
-                moved = true;
-            }
-
-            const char* stop_reason = nullptr;
-            if (g_ble_stop_requested.load()) {
-                stop_reason = "STOP/reversal/disconnect";
-            } else if (!control_fresh) {
-                stop_reason = "telemetry stale";
-            } else if (g_anomaly_sequence.load() != start_anomaly_sequence) {
-                stop_reason = "unexpected controller frame";
-            } else if (!have_progress &&
-                       control_now - motion_start_tick >= kMotionStartGrace) {
-                stop_reason = "no initial movement";
-            }
-
-            const bool step_finished =
-                moved && control_fresh && control_settled &&
-                control_now - motion_start_tick >= kStepCompletionMin;
-
-            if (stop_reason != nullptr) {
-                production_state = ProductionState::kSettling;
-                settle_start_tick = control_now;
-                ESP_LOGW("desk.control", "STEP -> IDLE: %s", stop_reason);
-            } else if (step_finished) {
-                const int actual = static_cast<int>(control_height) -
-                                   static_cast<int>(start_height);
-                const unsigned actual_abs =
-                    static_cast<unsigned>(actual >= 0 ? actual : -actual);
-                ESP_LOGW("desk.control",
-                         "STEP complete actual=%c%u.%u cm final=%u.%u",
-                         actual >= 0 ? '+' : '-', actual_abs / 10,
-                         actual_abs % 10,
+        if (controller.state() == smart_desk::ControlState::kIdle &&
+            !stop_requested &&
+            (request == ControllerRequest::kSaveSit ||
+             request == ControllerRequest::kSaveStand)) {
+            if (!control_fresh || !control_settled ||
+                control_height < kPhysicalMinTenthsCm ||
+                control_height > kPhysicalMaxTenthsCm) {
+                ESP_LOGE("desk.control",
+                         "preset save BLOCKED: fresh=%d settled=%d height=%u.%u",
+                         control_fresh, control_settled,
                          control_height / 10, control_height % 10);
-                production_state = ProductionState::kIdle;
-                direction = 0;
-                g_ble_active_direction.store(0);
-                g_ble_stop_requested.store(false);
-            } else if (have_new_raw) {
-                consumed_raw_sequence = raw_sequence;
-                if (raw_direction != direction) {
-                    production_state = ProductionState::kSettling;
-                    settle_start_tick = control_now;
-                    ESP_LOGW("desk.control", "STEP -> IDLE: dial reversal");
+            } else {
+                DeskPresets candidate = presets;
+                if (request == ControllerRequest::kSaveSit) {
+                    candidate.sit = control_height;
                 } else {
-                    gesture_event_count += new_raw_events;
-                    ESP_LOGI("desk.control",
-                             "dial reports discarded during autonomous STEP; total=%lu",
-                             static_cast<unsigned long>(gesture_event_count));
+                    candidate.stand = control_height;
+                }
+                if (!valid_presets(candidate)) {
+                    ESP_LOGE("desk.control",
+                             "preset save BLOCKED: require 70..120 cm and SIT+10<=STAND");
+                } else if (!save_presets(candidate)) {
+                    ESP_LOGE("desk.control", "preset save failed in NVS");
+                } else if (!controller.set_presets(candidate.sit,
+                                                   candidate.stand)) {
+                    ESP_LOGE("desk.control",
+                             "internal preset validation disagrees with NVS");
+                } else {
+                    presets = candidate;
+                    ESP_LOGW("desk.control",
+                             "saved SIT/min=%u.%u STAND/max=%u.%u cm",
+                             presets.sit / 10, presets.sit % 10,
+                             presets.stand / 10, presets.stand % 10);
                 }
             }
+            request = ControllerRequest::kNone;
         }
 
-        if (production_state == ProductionState::kManualHold ||
-            production_state == ProductionState::kPresetHold) {
-            if (have_new_raw) {
-                consumed_raw_sequence = raw_sequence;
-                gesture_event_count += new_raw_events;
-            }
-            // An initial change in either direction proves that the power
-            // controller reacted.  Directional extrema below remain the only
-            // source for target/limit decisions and refresh the stall timer.
-            // This mirrors the STEP handling and tolerates the observed
-            // startup sawtooth (for example 102.0 -> 102.5 before moving down).
-            if (!have_progress && control_height != start_height) {
-                have_progress = true;
-                moved = true;
-                progress_tick = control_now;
-            }
-            const bool progressed = direction > 0
-                                        ? control_height > progress_height
-                                        : control_height < progress_height;
-            if (progressed) {
-                progress_height = control_height;
-                progress_tick = control_now;
-                have_progress = true;
-                moved = true;
-            }
-            const bool telemetry_reversed =
-                direction > 0
-                    ? control_height + kBleTelemetryReversalLimitTenthsCm <=
-                          progress_height
-                    : control_height >= progress_height +
-                          kBleTelemetryReversalLimitTenthsCm;
-            const std::uint16_t coast =
-                direction > 0 ? kUpBoundaryCoastTenthsCm
-                              : kDownBoundaryCoastTenthsCm;
-            const std::uint16_t brake_height =
-                direction > 0 ? target_height - coast
-                              : target_height + coast;
-            const bool boundary_reached =
-                direction > 0 ? progress_height >= brake_height
-                              : progress_height <= brake_height;
-            const bool manual =
-                production_state == ProductionState::kManualHold;
-            const char* stop_reason = nullptr;
-
-            if (g_ble_stop_requested.load()) {
-                stop_reason = "STOP/reversal/disconnect";
-            } else if (production_state == ProductionState::kPresetHold &&
-                       have_new_raw) {
-                stop_reason = "dial override during preset";
-            } else if (!control_fresh) {
-                stop_reason = "telemetry stale";
-            } else if (g_anomaly_sequence.load() != start_anomaly_sequence) {
-                stop_reason = "unexpected controller frame";
-            } else if (telemetry_reversed) {
-                stop_reason = "telemetry reversed >=1.0 cm";
-            } else if (boundary_reached) {
-                stop_reason = manual ? "software hard limit brake point"
-                                     : "preset brake point";
-            } else if (manual &&
-                       control_now - g_ble_raw_tick.load() >=
-                           kManualHoldRelease) {
-                stop_reason = "dial released";
-            } else if (manual &&
-                       control_now - motion_start_tick >= kManualMaxRun) {
-                stop_reason = "30 s manual watchdog";
-            } else if (!manual &&
-                       control_now - motion_start_tick >= kPresetMaxRun) {
-                stop_reason = "20 s preset watchdog";
-            } else if (have_progress &&
-                       control_now - progress_tick >= kMotionStall) {
-                stop_reason = "height stalled";
-            } else if (!have_progress &&
-                       control_now - motion_start_tick >= kMotionStartGrace) {
-                stop_reason = "no initial movement";
-            }
-
-            if (stop_reason == nullptr) {
-                outgoing = direction > 0 ? &up_hold : &down_hold;
-            } else {
-                production_state = ProductionState::kSettling;
-                settle_start_tick = control_now;
-                ESP_LOGW("desk.control",
-                         "HOLD -> IDLE: %s at %u.%u; events=%lu",
-                         stop_reason, control_height / 10,
-                         control_height % 10,
-                         static_cast<unsigned long>(gesture_event_count));
-            }
+        smart_desk::ControlRequest motion_request =
+            smart_desk::ControlRequest::kNone;
+        if (request == ControllerRequest::kGoSit) {
+            motion_request = smart_desk::ControlRequest::kGoSit;
+        } else if (request == ControllerRequest::kGoStand) {
+            motion_request = smart_desk::ControlRequest::kGoStand;
         }
 
-        if (production_state == ProductionState::kSettling) {
-            if (have_new_raw) {
-                consumed_raw_sequence = raw_sequence;
-                ESP_LOGI("desk.control",
-                         "dial discarded during coast/settling");
-            }
-            const bool directional_motion =
-                direction > 0 ? control_height >= start_height + 2
-                              : start_height >= control_height + 2;
-            moved = moved || directional_motion;
-            const bool enough_time =
-                control_now - settle_start_tick >= kSettleMin;
-            const bool input_quiet =
-                control_now - g_ble_raw_tick.load() >= kRearmQuiet;
-            const bool finished =
-                control_fresh && control_settled && enough_time && input_quiet &&
-                (moved || control_now - motion_start_tick >= kSettleNoMotion);
-            const bool watchdog =
-                control_now - settle_start_tick >= kSettleWatchdog;
-            if (finished || watchdog) {
-                const int actual = static_cast<int>(control_height) -
-                                   static_cast<int>(start_height);
-                const unsigned actual_abs =
-                    static_cast<unsigned>(actual >= 0 ? actual : -actual);
-                ESP_LOGW("desk.control",
-                         "IDLE stable: actual=%c%u.%u cm final=%u.%u%s",
-                         actual >= 0 ? '+' : '-', actual_abs / 10,
-                         actual_abs % 10, control_height / 10,
-                         control_height % 10,
-                         watchdog ? " (settle watchdog)" : "");
-                production_state = ProductionState::kIdle;
-                direction = 0;
-                gesture_event_count = 0;
-                g_ble_active_direction.store(0);
-                g_ble_stop_requested.store(false);
-                g_controller_request.store(ControllerRequest::kNone);
-                ESP_LOGI("desk.control", "READY");
-            }
+        smart_desk::ControllerInput controller_input;
+        controller_input.now_ms = control_now_ms;
+        controller_input.height_tenths_cm = control_height;
+        controller_input.telemetry_fresh = control_fresh;
+        controller_input.telemetry_settled = control_settled;
+        controller_input.anomaly_sequence = telemetry.anomaly_sequence;
+        controller_input.dial_sequence = dial.sequence;
+        controller_input.dial_direction = dial.direction;
+        controller_input.last_dial_ms =
+            static_cast<std::uint32_t>(dial.tick) * portTICK_PERIOD_MS;
+        controller_input.stop_requested = stop_requested;
+        controller_input.request = motion_request;
+
+        const smart_desk::ControllerOutput controller_output =
+            controller.update(controller_input);
+        g_ble_active_direction.store(controller.direction());
+
+        if (controller_output.reason != smart_desk::TransitionReason::kNone ||
+            controller_output.state != logged_state) {
+            ESP_LOGW("desk.control", "%s -> %s: %s at %u.%u cm",
+                     smart_desk::control_state_name(logged_state),
+                     smart_desk::control_state_name(controller_output.state),
+                     smart_desk::transition_reason_name(
+                         controller_output.reason),
+                     control_height / 10, control_height % 10);
+            logged_state = controller_output.state;
         }
+
+        const auto controller_frame =
+            smart_desk::make_panel_frame(controller_output.command);
+        outgoing = &controller_frame;
 #endif
 
 #if CONFIG_DESK_MODE_HOLD_DOWN_TEST
@@ -1329,8 +1005,37 @@ void panel_writer_task(void*) {
                                              outgoing->size());
         if (written != static_cast<int>(outgoing->size())) {
             ESP_LOGE("desk.idle", "UART write failed: %d/8 bytes", written);
+#if CONFIG_DESK_MODE_BLE_CONTROLLER
+        } else {
+            g_panel_heartbeat.fetch_add(1);
+#endif
         }
         xTaskDelayUntil(&last_wake, kPanelPeriod);
+    }
+}
+#endif
+
+#if CONFIG_DESK_MODE_BLE_CONTROLLER
+void panel_watchdog_task(void*) {
+    std::uint32_t previous = g_panel_heartbeat.load();
+    unsigned missed_seconds = 0;
+
+    while (true) {
+        vTaskDelay(pdMS_TO_TICKS(1000));
+        const std::uint32_t current = g_panel_heartbeat.load();
+        if (current != previous) {
+            previous = current;
+            missed_seconds = 0;
+            continue;
+        }
+
+        ++missed_seconds;
+        ESP_LOGE("desk.watchdog", "panel writer heartbeat missing: %u s",
+                 missed_seconds);
+        if (missed_seconds >= 3) {
+            ESP_LOGE("desk.watchdog", "panel writer stalled; restarting ESP");
+            esp_restart();
+        }
     }
 }
 #endif
@@ -1468,9 +1173,12 @@ extern "C" void app_main() {
     // BLE initialization owns NVS initialization. Start the writer afterwards
     // so its persisted preset read cannot race nvs_flash_init().
     start_ble_hid_logger(ble_motion_action, nullptr, false);
-    xTaskCreate(reader_task, "controller_rx", 4096, &kEmulatorReader, 5,
-                nullptr);
-    xTaskCreate(panel_writer_task, "panel_tx", 6144, nullptr, 5, nullptr);
+    configASSERT(xTaskCreate(reader_task, "controller_rx", 4096,
+                             &kEmulatorReader, 5, nullptr) == pdPASS);
+    configASSERT(xTaskCreate(panel_writer_task, "panel_tx", 6144, nullptr, 5,
+                             nullptr) == pdPASS);
+    configASSERT(xTaskCreate(panel_watchdog_task, "panel_watchdog", 2048,
+                             nullptr, 6, nullptr) == pdPASS);
 #else
 #error "Select a smart desk firmware mode"
 #endif

@@ -63,6 +63,19 @@ void publish_action(BleHidActionType type, int value = 0) {
     }
 }
 
+void reset_semantic_state() {
+    taskENTER_CRITICAL(&g_semantic_lock);
+    g_sit_pressed = false;
+    g_stand_pressed = false;
+    g_sit_press_tick = 0;
+    g_stand_press_tick = 0;
+    g_dial_direction = 0;
+    g_dial_event_count = 0;
+    g_dial_last_tick = 0;
+    g_dial_cancelled_until_quiet = false;
+    taskEXIT_CRITICAL(&g_semantic_lock);
+}
+
 bool contains_text(const char* haystack, const char* needle) {
     return haystack != nullptr && std::strstr(haystack, needle) != nullptr;
 }
@@ -371,6 +384,7 @@ void hid_event(void*, esp_event_base_t, std::int32_t event_id,
         case ESP_HIDH_CLOSE_EVENT:
             ESP_LOGW(kTag, "DISCONNECTED reason=%d", data->close.reason);
             ESP_LOGW(kTag, "ACTION STOP (BLE disconnected)");
+            reset_semantic_state();
             publish_action(BleHidActionType::kDisconnected);
             g_connected.store(false);
             g_open_pending.store(false);
