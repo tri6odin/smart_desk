@@ -1,0 +1,5 @@
+# Separate build defaults for the first active test.
+# This mode can transmit, so it must never be flashed while the stock panel is
+# electrically connected to the panel-to-controller data line.
+# CONFIG_DESK_MODE_READ_ONLY is not set
+CONFIG_DESK_MODE_IDLE_EMULATOR=y

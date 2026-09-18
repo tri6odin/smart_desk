@@ -1,0 +1,8 @@
+* text=auto
+
+# Measurement evidence and board/manual photographs are intentionally tracked.
+*.sr binary
+*.jpeg binary
+*.jpg binary
+*.png binary
+*.pdf binary

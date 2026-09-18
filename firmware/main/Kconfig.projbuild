@@ -1,0 +1,70 @@
+menu "Smart desk firmware"
+
+choice DESK_FIRMWARE_MODE
+    prompt "Firmware mode"
+    default DESK_MODE_READ_ONLY
+
+config DESK_MODE_READ_ONLY
+    bool "Read-only two-line sniffer"
+    help
+        GPIO17 and GPIO18 are inputs. The firmware cannot transmit desk commands.
+
+config DESK_MODE_IDLE_EMULATOR
+    bool "Idle-only panel emulator"
+    help
+        GPIO17 transmits only the fixed IDLE frame. GPIO18 receives height.
+        Disconnect the original panel before flashing this mode.
+
+config DESK_MODE_STEP_DOWN_TEST
+    bool "One-shot STEP DOWN test"
+    help
+        GPIO17 normally transmits IDLE. One BOOT-button press may transmit one
+        DOWN_STEP frame, but only with fresh telemetry between 110.0 and
+        120.0 cm. Further presses are locked out until reset.
+        Disconnect the original panel before flashing this mode.
+
+config DESK_MODE_HOLD_DOWN_TEST
+    bool "Watchdog-limited HOLD DOWN test"
+    help
+        GPIO17 normally transmits IDLE. Holding BOOT transmits DOWN_HOLD only
+        with fresh telemetry. The run is limited by time, travel, release,
+        telemetry loss, stall and direction reversal, then locked until reset.
+        Disconnect the original panel before flashing this mode.
+
+config DESK_MODE_BLE_HID_LOGGER
+    bool "BLE HID logger with IDLE-only panel emulator"
+    help
+        GPIO17 transmits only the fixed IDLE frame and GPIO18 reads telemetry.
+        BLE input reports are logged but can never generate desk commands.
+        Disconnect the original panel before flashing this mode.
+
+config DESK_MODE_BLE_ONE_SHOT_TEST
+    bool "BLE one-shot, watchdog-limited 1 cm motion test"
+    help
+        Accepts one slow +/-1 cm dial gesture per boot. The hold command is
+        bounded by fresh telemetry, direction, stall, time and travel checks,
+        then the firmware sends IDLE and locks. Fast +/-3 cm gestures and
+        presets are rejected. Disconnect the original panel first.
+
+config DESK_MODE_BLE_CALIBRATION
+    bool "BLE multi-run STEP/HOLD calibration"
+    help
+        Allows repeated, separated calibration runs without reflashing. A
+        single dial event sends one autonomous 1 cm STEP; an accelerated dial
+        burst requests 3 cm through watchdog-limited HOLD with direction-
+        specific coast compensation. Input is discarded during motion and
+        settling, and the next run is accepted only after stable telemetry.
+        Disconnect the original panel first.
+
+config DESK_MODE_BLE_CONTROLLER
+    bool "BLE production controller"
+    help
+        Replaces the original panel. The first dial event moves immediately;
+        continued rotation becomes a leased HOLD with no movement queue.
+        SIT/STAND are ESP-owned absolute targets and software limits. Dial
+        press, reversal, telemetry failure or BLE disconnect sends IDLE.
+        Disconnect the original panel first.
+
+endchoice
+
+endmenu

@@ -1,0 +1,3 @@
+# Separate build defaults for watchdog-limited DOWN_HOLD testing.
+# CONFIG_DESK_MODE_READ_ONLY is not set
+CONFIG_DESK_MODE_HOLD_DOWN_TEST=y

@@ -1,0 +1,18 @@
+# macOS / editors
+.DS_Store
+.idea/
+.vscode/
+*.swp
+
+# Python helpers
+__pycache__/
+*.py[cod]
+
+# ESP-IDF and host build products
+firmware/build*/
+
+# Generated ESP-IDF configurations. Reproducible *.defaults stay versioned.
+firmware/sdkconfig
+firmware/sdkconfig.*
+!firmware/sdkconfig.defaults
+!firmware/sdkconfig.*.defaults
