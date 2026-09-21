@@ -31,6 +31,7 @@ ControllerInput stable_input(std::uint32_t now_ms,
     input.height_tenths_cm = height_tenths_cm;
     input.telemetry_fresh = true;
     input.telemetry_settled = true;
+    input.telemetry_stable_frames = 5;
     input.last_dial_ms = now_ms;
     return input;
 }
@@ -60,6 +61,7 @@ void test_slow_detent_is_one_autonomous_step() {
     input.now_ms = 300;
     input.height_tenths_cm = 1004;
     input.telemetry_settled = false;
+    input.telemetry_stable_frames = 0;
     result = controller.update(input);
     CHECK(result.state == ControlState::kManualStep);
     CHECK(result.command == Command::kIdle);
@@ -110,6 +112,7 @@ void test_short_fast_spin_from_90_stops_after_input_silence() {
     input.now_ms = 300;
     input.height_tenths_cm = 905;
     input.telemetry_settled = false;
+    input.telemetry_stable_frames = 0;
     result = controller.update(input);
     CHECK(result.state == ControlState::kManualHold);
     CHECK(result.command == Command::kUpHold);
@@ -139,6 +142,7 @@ void test_continuous_reports_keep_hold_live() {
         input.now_ms = now;
         input.height_tenths_cm = static_cast<std::uint16_t>(900 + now / 10);
         input.telemetry_settled = false;
+        input.telemetry_stable_frames = 0;
         add_dial(input, 5 + now / 100, +1, now);
         result = controller.update(input);
         CHECK(result.state == ControlState::kManualHold);
@@ -158,6 +162,7 @@ void test_reversal_stops_without_starting_opposite_motion() {
     input.now_ms = 200;
     input.height_tenths_cm = 1003;
     input.telemetry_settled = false;
+    input.telemetry_stable_frames = 0;
     add_dial(input, 6, -1, 200);
     const auto result = controller.update(input);
     CHECK(result.state == ControlState::kSettling);
@@ -177,6 +182,7 @@ void test_reports_during_settling_are_discarded_not_queued() {
     input.now_ms = 500;
     input.height_tenths_cm = 1010;
     input.telemetry_settled = false;
+    input.telemetry_stable_frames = 0;
     auto result = controller.update(input);
     CHECK(result.state == ControlState::kSettling);
     CHECK(result.reason == TransitionReason::kDialReleased);
@@ -187,14 +193,15 @@ void test_reports_during_settling_are_discarded_not_queued() {
     CHECK(result.state == ControlState::kSettling);
     CHECK(result.command == Command::kIdle);
 
-    input.now_ms = 2500;
+    input.now_ms = 1400;
     input.telemetry_settled = true;
+    input.telemetry_stable_frames = 5;
     input.last_dial_ms = 900;
     result = controller.update(input);
     CHECK(result.state == ControlState::kIdle);
     CHECK(result.command == Command::kIdle);
 
-    input.now_ms = 2600;
+    input.now_ms = 1500;
     result = controller.update(input);
     CHECK(result.state == ControlState::kIdle);
     CHECK(result.command == Command::kIdle);
@@ -211,6 +218,7 @@ void test_step_with_never_settled_telemetry_has_deadline() {
     input.now_ms = 300;
     input.height_tenths_cm = 1005;
     input.telemetry_settled = false;
+    input.telemetry_stable_frames = 0;
     auto result = controller.update(input);
     CHECK(result.state == ControlState::kManualStep);
 
@@ -256,6 +264,7 @@ void test_stand_brakes_at_measured_coast_point() {
     input.now_ms = 5000;
     input.height_tenths_cm = 1125;
     input.telemetry_settled = false;
+    input.telemetry_stable_frames = 0;
     result = controller.update(input);
     CHECK(result.state == ControlState::kSettling);
     CHECK(result.command == Command::kIdle);
@@ -274,15 +283,107 @@ void test_sit_brakes_at_measured_coast_point() {
     input.now_ms = 5000;
     input.height_tenths_cm = 820;
     input.telemetry_settled = false;
+    input.telemetry_stable_frames = 0;
     result = controller.update(input);
     CHECK(result.state == ControlState::kSettling);
     CHECK(result.command == Command::kIdle);
     CHECK(result.reason == TransitionReason::kBoundaryReached);
 }
 
+void test_rewriting_presets_does_not_change_manual_limits() {
+    DeskController manual_controller;
+    CHECK(manual_controller.set_presets(900, 1100));
+
+    auto input = stable_input(0, 850);
+    add_dial(input, 1, -1, 0);
+    auto result = manual_controller.update(input);
+    CHECK(result.state == ControlState::kDialClassify);
+    CHECK(result.reason == TransitionReason::kDialStarted);
+
+    DeskController preset_controller;
+    CHECK(preset_controller.set_presets(900, 1100));
+    input = stable_input(0, 1000);
+    input.request = ControlRequest::kGoSit;
+    result = preset_controller.update(input);
+    CHECK(result.state == ControlState::kPresetHold);
+    CHECK(result.command == Command::kDownHold);
+
+    input.request = ControlRequest::kNone;
+    input.now_ms = 3000;
+    input.height_tenths_cm = 920;
+    input.telemetry_settled = false;
+    input.telemetry_stable_frames = 0;
+    result = preset_controller.update(input);
+    CHECK(result.state == ControlState::kSettling);
+    CHECK(result.reason == TransitionReason::kBoundaryReached);
+}
+
+void test_same_direction_gesture_rearms_after_quiet_and_three_frames() {
+    DeskController controller;
+    auto input = stable_input(0, 900);
+    add_dial(input, 1, +1, 0);
+    controller.update(input);
+    input.now_ms = 100;
+    add_dial(input, 5, +1, 100);
+    controller.update(input);
+
+    input.now_ms = 500;
+    input.height_tenths_cm = 910;
+    input.telemetry_settled = false;
+    input.telemetry_stable_frames = 0;
+    auto result = controller.update(input);
+    CHECK(result.state == ControlState::kSettling);
+
+    input.now_ms = 1000;
+    input.height_tenths_cm = 912;
+    input.telemetry_stable_frames = 3;
+    add_dial(input, 6, +1, 1000);
+    result = controller.update(input);
+    CHECK(result.state == ControlState::kDialClassify);
+    CHECK(result.reason == TransitionReason::kDialStarted);
+
+    input.now_ms = 1100;
+    result = controller.update(input);
+    CHECK(result.state == ControlState::kManualStep);
+    CHECK(result.command == Command::kUpStep);
+}
+
+void test_opposite_gesture_waits_for_full_stop_but_is_not_queued() {
+    DeskController controller;
+    auto input = stable_input(0, 1000);
+    add_dial(input, 1, +1, 0);
+    controller.update(input);
+    input.now_ms = 100;
+    add_dial(input, 5, +1, 100);
+    controller.update(input);
+
+    input.now_ms = 500;
+    input.height_tenths_cm = 1010;
+    input.telemetry_settled = false;
+    input.telemetry_stable_frames = 0;
+    auto result = controller.update(input);
+    CHECK(result.state == ControlState::kSettling);
+
+    input.now_ms = 1000;
+    input.height_tenths_cm = 1012;
+    input.telemetry_stable_frames = 3;
+    add_dial(input, 6, -1, 1000);
+    result = controller.update(input);
+    CHECK(result.state == ControlState::kSettling);
+    CHECK(result.command == Command::kIdle);
+
+    input.now_ms = 1600;
+    input.telemetry_settled = true;
+    input.telemetry_stable_frames = 5;
+    add_dial(input, 7, -1, 1600);
+    result = controller.update(input);
+    CHECK(result.state == ControlState::kDialClassify);
+    CHECK(result.reason == TransitionReason::kDialStarted);
+}
+
 void test_soft_limits_block_only_outward_direction() {
     DeskController controller;
-    auto input = stable_input(0, 1150);
+    auto input = stable_input(0, 1200);
     add_dial(input, 1, +1, 0);
     auto result = controller.update(input);
     CHECK(result.state == ControlState::kIdle);
@@ -295,7 +396,10 @@ void test_soft_limits_block_only_outward_direction() {
 }
 
 void test_soft_limits_recover_when_already_outside_configured_range() {
-    DeskController controller;
+    smart_desk::ControllerConfig config;
+    config.soft_min_tenths_cm = 800;
+    config.soft_max_tenths_cm = 1150;
+    DeskController controller(config);
     auto input = stable_input(0, 1160);
     add_dial(input, 1, +1, 0);
     auto result = controller.update(input);
@@ -307,7 +411,7 @@ void test_soft_limits_recover_when_already_outside_configured_range() {
     result = controller.update(input);
     CHECK(result.state == ControlState::kDialClassify);
 
-    DeskController low_controller;
+    DeskController low_controller(config);
     input = stable_input(0, 790);
     add_dial(input, 1, -1, 0);
     result = low_controller.update(input);
@@ -335,6 +439,7 @@ void test_stop_during_manual_hold_is_immediate_and_not_queued() {
     input.now_ms = 200;
     input.height_tenths_cm = 903;
     input.telemetry_settled = false;
+    input.telemetry_stable_frames = 0;
     input.stop_requested = true;
     result = controller.update(input);
     CHECK(result.state == ControlState::kSettling);
@@ -372,6 +477,7 @@ void test_stop_during_preset_does_not_queue_new_preset() {
     input.request = ControlRequest::kGoSit;
     input.height_tenths_cm = 1010;
     input.telemetry_settled = false;
+    input.telemetry_stable_frames = 0;
     const auto result = controller.update(input);
     CHECK(result.state == ControlState::kSettling);
     CHECK(result.command == Command::kIdle);
@@ -391,6 +497,9 @@ int main() {
     test_reports_arriving_as_step_completes_are_not_queued();
     test_stand_brakes_at_measured_coast_point();
     test_sit_brakes_at_measured_coast_point();
+    test_rewriting_presets_does_not_change_manual_limits();
+    test_same_direction_gesture_rearms_after_quiet_and_three_frames();
+    test_opposite_gesture_waits_for_full_stop_but_is_not_queued();
     test_soft_limits_block_only_outward_direction();
     test_soft_limits_recover_when_already_outside_configured_range();
     test_stop_during_manual_hold_is_immediate_and_not_queued();

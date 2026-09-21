@@ -52,8 +52,10 @@ enum class TransitionReason {
 struct ControllerConfig {
     std::uint16_t physical_min_tenths_cm = 700;
     std::uint16_t physical_max_tenths_cm = 1200;
-    std::uint16_t sit_tenths_cm = 800;
-    std::uint16_t stand_tenths_cm = 1150;
+    std::uint16_t soft_min_tenths_cm = 700;
+    std::uint16_t soft_max_tenths_cm = 1200;
+    std::uint16_t sit_target_tenths_cm = 800;
+    std::uint16_t stand_target_tenths_cm = 1150;
     std::uint16_t up_coast_tenths_cm = 25;
     std::uint16_t down_coast_tenths_cm = 20;
     std::uint16_t telemetry_reversal_tenths_cm = 10;
@@ -69,10 +71,10 @@ struct ControllerConfig {
     std::uint32_t motion_stall_ms = 2000;
     std::uint32_t preset_max_run_ms = 20000;
     std::uint32_t manual_max_run_ms = 30000;
-    std::uint32_t settle_min_ms = 1500;
-    std::uint32_t settle_no_motion_ms = 3000;
     std::uint32_t settle_watchdog_ms = 7000;
     std::uint32_t rearm_quiet_ms = 500;
+    std::uint32_t full_settle_frames = 5;
+    std::uint32_t same_direction_rearm_frames = 3;
 };
 
 struct ControllerInput {
@@ -80,6 +82,7 @@ struct ControllerInput {
     std::uint16_t height_tenths_cm = 0;
     bool telemetry_fresh = false;
     bool telemetry_settled = false;
+    std::uint32_t telemetry_stable_frames = 0;
     std::uint32_t anomaly_sequence = 0;
 
     // Monotonic modulo-2^32 counter. Multiple reports may be coalesced into
@@ -120,6 +123,11 @@ private:
     bool elapsed(std::uint32_t now, std::uint32_t since,
                  std::uint32_t duration) const;
     std::uint32_t consume_dial_reports(const ControllerInput& input);
+    bool full_step_inside_soft_limits(const ControllerInput& input,
+                                      int direction) const;
+    void begin_dial_classification(const ControllerInput& input,
+                                   int direction, std::uint32_t reports,
+                                   std::uint32_t required_stable_frames);
     void begin_motion(const ControllerInput& input, int direction,
                       std::uint16_t target_height);
     void begin_settling(const ControllerInput& input);
@@ -137,7 +145,9 @@ private:
     std::uint32_t motion_start_ms_ = 0;
     std::uint32_t progress_ms_ = 0;
     std::uint32_t settle_start_ms_ = 0;
+    std::uint32_t settle_last_dial_ms_ = 0;
     std::uint32_t start_anomaly_sequence_ = 0;
+    std::uint32_t required_start_stable_frames_ = 0;
     bool have_progress_ = false;
     bool moved_ = false;
     bool allow_hold_ = true;

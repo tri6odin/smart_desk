@@ -390,7 +390,7 @@ DeskPresets load_presets() {
             presets = stored;
         }
     }
-    ESP_LOGW("desk.control", "SIT/min=%u.%u cm STAND/max=%u.%u cm",
+    ESP_LOGW("desk.control", "SIT=%u.%u cm STAND=%u.%u cm limits=70.0..120.0",
              presets.sit / 10, presets.sit % 10,
              presets.stand / 10, presets.stand % 10);
     return presets;
@@ -472,8 +472,10 @@ void panel_writer_task(void*) {
     constexpr std::uint32_t kProductionSettledFrames = 5;
     DeskPresets presets = load_presets();
     smart_desk::ControllerConfig controller_config;
-    controller_config.sit_tenths_cm = presets.sit;
-    controller_config.stand_tenths_cm = presets.stand;
+    controller_config.soft_min_tenths_cm = kPhysicalMinTenthsCm;
+    controller_config.soft_max_tenths_cm = kPhysicalMaxTenthsCm;
+    controller_config.sit_target_tenths_cm = presets.sit;
+    controller_config.stand_target_tenths_cm = presets.stand;
     smart_desk::DeskController controller(controller_config);
 
     // Ignore any BLE reports received while this task was being created.
@@ -770,7 +772,7 @@ void panel_writer_task(void*) {
                 } else {
                     presets = candidate;
                     ESP_LOGW("desk.control",
-                             "saved SIT/min=%u.%u STAND/max=%u.%u cm",
+                             "saved SIT=%u.%u STAND=%u.%u cm; limits unchanged at 70.0..120.0",
                              presets.sit / 10, presets.sit % 10,
                              presets.stand / 10, presets.stand % 10);
                 }
@@ -791,6 +793,8 @@ void panel_writer_task(void*) {
         controller_input.height_tenths_cm = control_height;
         controller_input.telemetry_fresh = control_fresh;
         controller_input.telemetry_settled = control_settled;
+        controller_input.telemetry_stable_frames =
+            telemetry.consistent_frames;
         controller_input.anomaly_sequence = telemetry.anomaly_sequence;
         controller_input.dial_sequence = dial.sequence;
         controller_input.dial_direction = dial.direction;
@@ -1165,7 +1169,7 @@ extern "C" void app_main() {
     ESP_LOGW("smart_desk",
              "BLE CONTROLLER; original panel must be disconnected");
     ESP_LOGW("smart_desk",
-             "SIT/min=80 cm, STAND/max=115 cm; dial is immediate/no queue");
+             "SIT=80 cm, STAND=115 cm, limits=70..120 cm; no queue");
     ESP_LOGI("smart_desk", "GPIO17=TX; GPIO18=height RX");
 
     configure_uart(UART_NUM_1, kPanelToControllerRxGpio,

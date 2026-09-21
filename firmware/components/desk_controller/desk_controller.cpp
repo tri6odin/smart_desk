@@ -14,8 +14,8 @@ DeskController::DeskController(ControllerConfig config)
 
 bool DeskController::valid_presets(std::uint16_t sit_tenths_cm,
                                    std::uint16_t stand_tenths_cm) const {
-    return sit_tenths_cm >= config_.physical_min_tenths_cm &&
-           stand_tenths_cm <= config_.physical_max_tenths_cm &&
+    return sit_tenths_cm >= config_.soft_min_tenths_cm &&
+           stand_tenths_cm <= config_.soft_max_tenths_cm &&
            static_cast<std::uint32_t>(sit_tenths_cm) +
                    kMinimumPresetGapTenthsCm <=
                stand_tenths_cm;
@@ -26,8 +26,8 @@ bool DeskController::set_presets(std::uint16_t sit_tenths_cm,
     if (!valid_presets(sit_tenths_cm, stand_tenths_cm)) {
         return false;
     }
-    config_.sit_tenths_cm = sit_tenths_cm;
-    config_.stand_tenths_cm = stand_tenths_cm;
+    config_.sit_target_tenths_cm = sit_tenths_cm;
+    config_.stand_target_tenths_cm = stand_tenths_cm;
     return true;
 }
 
@@ -50,6 +50,37 @@ std::uint32_t DeskController::consume_dial_reports(
     return count;
 }
 
+bool DeskController::full_step_inside_soft_limits(
+    const ControllerInput& input, int direction) const {
+    return direction > 0
+               ? static_cast<std::uint32_t>(input.height_tenths_cm) + 10U <=
+                     config_.soft_max_tenths_cm
+               : static_cast<std::uint32_t>(input.height_tenths_cm) >=
+                     static_cast<std::uint32_t>(
+                         config_.soft_min_tenths_cm) +
+                         10U;
+}
+
+void DeskController::begin_dial_classification(
+    const ControllerInput& input, int direction, std::uint32_t reports,
+    std::uint32_t required_stable_frames) {
+    begin_motion(input, direction,
+                 direction > 0 ? config_.soft_max_tenths_cm
+                               : config_.soft_min_tenths_cm);
+    gesture_event_count_ = reports;
+    required_start_stable_frames_ = required_stable_frames;
+    const std::uint16_t coast =
+        direction_ > 0 ? config_.up_coast_tenths_cm
+                       : config_.down_coast_tenths_cm;
+    const std::uint16_t brake_height =
+        direction_ > 0 ? target_height_ - coast : target_height_ + coast;
+    const bool inside_brake_zone =
+        direction_ > 0 ? input.height_tenths_cm >= brake_height
+                       : input.height_tenths_cm <= brake_height;
+    allow_hold_ = !inside_brake_zone;
+    state_ = ControlState::kDialClassify;
+}
+
 void DeskController::begin_motion(const ControllerInput& input, int direction,
                                   std::uint16_t target_height) {
     direction_ = direction;
@@ -67,6 +98,7 @@ void DeskController::begin_motion(const ControllerInput& input, int direction,
 void DeskController::begin_settling(const ControllerInput& input) {
     state_ = ControlState::kSettling;
     settle_start_ms_ = input.now_ms;
+    settle_last_dial_ms_ = input.last_dial_ms;
 }
 
 void DeskController::become_idle() {
@@ -104,8 +136,8 @@ ControllerOutput DeskController::update(const ControllerInput& input) {
             if (input.request != ControlRequest::kNone) {
                 const std::uint16_t target =
                     input.request == ControlRequest::kGoSit
-                        ? config_.sit_tenths_cm
-                        : config_.stand_tenths_cm;
+                        ? config_.sit_target_tenths_cm
+                        : config_.stand_target_tenths_cm;
                 if (!valid_height(input) || !input.telemetry_settled) {
                     return output(command,
                                   TransitionReason::kTelemetryNotReady);
@@ -139,34 +171,13 @@ ControllerOutput DeskController::update(const ControllerInput& input) {
                 return output(command,
                               TransitionReason::kTelemetryNotReady);
             }
-            const bool full_step_inside_limit =
-                input.dial_direction > 0
-                    ? static_cast<std::uint32_t>(input.height_tenths_cm) + 10U <=
-                          config_.stand_tenths_cm
-                    : static_cast<std::uint32_t>(input.height_tenths_cm) >=
-                          static_cast<std::uint32_t>(
-                              config_.sit_tenths_cm) +
-                              10U;
-            if (!full_step_inside_limit) {
+            if (!full_step_inside_soft_limits(input,
+                                              input.dial_direction)) {
                 return output(command, TransitionReason::kSoftLimit);
             }
 
-            begin_motion(input, input.dial_direction,
-                         input.dial_direction > 0
-                             ? config_.stand_tenths_cm
-                             : config_.sit_tenths_cm);
-            gesture_event_count_ = reports;
-            const std::uint16_t coast =
-                direction_ > 0 ? config_.up_coast_tenths_cm
-                               : config_.down_coast_tenths_cm;
-            const std::uint16_t brake_height =
-                direction_ > 0 ? target_height_ - coast
-                               : target_height_ + coast;
-            const bool inside_brake_zone =
-                direction_ > 0 ? input.height_tenths_cm >= brake_height
-                               : input.height_tenths_cm <= brake_height;
-            allow_hold_ = !inside_brake_zone;
-            state_ = ControlState::kDialClassify;
+            begin_dial_classification(input, input.dial_direction, reports,
+                                      config_.full_settle_frames);
             return output(command, TransitionReason::kDialStarted);
         }
 
@@ -184,7 +195,9 @@ ControllerOutput DeskController::update(const ControllerInput& input) {
                 become_idle();
                 return output(command, TransitionReason::kStopRequested);
             }
-            if (!valid_height(input) || !input.telemetry_settled) {
+            if (!valid_height(input) ||
+                input.telemetry_stable_frames <
+                    required_start_stable_frames_) {
                 become_idle();
                 return output(command,
                               TransitionReason::kTelemetryNotReady);
@@ -359,7 +372,32 @@ ControllerOutput DeskController::update(const ControllerInput& input) {
 
         case ControlState::kSettling: {
             if (pending_reports != 0) {
-                consume_dial_reports(input);
+                const bool valid_direction =
+                    input.dial_direction == 1 || input.dial_direction == -1;
+                const bool same_direction =
+                    valid_direction && input.dial_direction == direction_;
+                const std::uint32_t required_frames =
+                    same_direction ? config_.same_direction_rearm_frames
+                                   : config_.full_settle_frames;
+                const bool quiet_before_new_gesture =
+                    elapsed(input.last_dial_ms, settle_last_dial_ms_,
+                            config_.rearm_quiet_ms);
+                const bool can_rearm =
+                    !input.stop_requested &&
+                    input.request == ControlRequest::kNone &&
+                    valid_direction && valid_height(input) &&
+                    input.telemetry_stable_frames >= required_frames &&
+                    quiet_before_new_gesture &&
+                    full_step_inside_soft_limits(input,
+                                                 input.dial_direction);
+                const std::uint32_t reports = consume_dial_reports(input);
+                if (can_rearm) {
+                    begin_dial_classification(input, input.dial_direction,
+                                              reports, required_frames);
+                    return output(command,
+                                  TransitionReason::kDialStarted);
+                }
+                settle_last_dial_ms_ = input.last_dial_ms;
             }
             const bool directional_motion =
                 direction_ > 0
@@ -367,17 +405,11 @@ ControllerOutput DeskController::update(const ControllerInput& input) {
                     : static_cast<std::uint32_t>(input.height_tenths_cm) + 2U <=
                           start_height_;
             moved_ = moved_ || directional_motion;
-            const bool enough_time =
-                elapsed(input.now_ms, settle_start_ms_, config_.settle_min_ms);
             const bool input_quiet =
-                elapsed(input.now_ms, input.last_dial_ms,
+                elapsed(input.now_ms, settle_last_dial_ms_,
                         config_.rearm_quiet_ms);
-            const bool no_motion_timeout =
-                elapsed(input.now_ms, motion_start_ms_,
-                        config_.settle_no_motion_ms);
             const bool finished = input.telemetry_fresh &&
-                                  input.telemetry_settled && enough_time &&
-                                  input_quiet && (moved_ || no_motion_timeout);
+                                  input.telemetry_settled && input_quiet;
             const bool watchdog =
                 elapsed(input.now_ms, settle_start_ms_,
                         config_.settle_watchdog_ms);
