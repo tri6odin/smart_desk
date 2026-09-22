@@ -59,8 +59,13 @@ struct ControllerConfig {
     std::uint16_t up_coast_tenths_cm = 25;
     std::uint16_t down_coast_tenths_cm = 20;
     std::uint16_t telemetry_reversal_tenths_cm = 10;
-    std::uint32_t hold_escalation_reports = 4;
-    std::uint32_t classify_ms = 100;
+    // One physical D100H detent has produced up to two press reports in the
+    // measured traces.  The third same-direction report is therefore the
+    // earliest unambiguous evidence of continued rotation.
+    std::uint32_t hold_escalation_reports = 3;
+    // Keep an ambiguous one/two-report gesture open long enough to include
+    // the measured ~270 ms pause before the D100H starts accelerated repeats.
+    std::uint32_t classify_ms = 300;
     std::uint32_t manual_release_ms = 350;
     std::uint32_t step_completion_min_ms = 500;
     // A normal autonomous STEP is already expected to react within 2.5 s.
@@ -128,6 +133,8 @@ private:
     void begin_dial_classification(const ControllerInput& input,
                                    int direction, std::uint32_t reports,
                                    std::uint32_t required_stable_frames);
+    bool hold_classification_ready() const;
+    ControllerOutput begin_manual_hold(const ControllerInput& input);
     void begin_motion(const ControllerInput& input, int direction,
                       std::uint16_t target_height);
     void begin_settling(const ControllerInput& input);

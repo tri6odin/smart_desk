@@ -81,6 +81,20 @@ void DeskController::begin_dial_classification(
     state_ = ControlState::kDialClassify;
 }
 
+bool DeskController::hold_classification_ready() const {
+    return allow_hold_ &&
+           gesture_event_count_ >= config_.hold_escalation_reports;
+}
+
+ControllerOutput DeskController::begin_manual_hold(
+    const ControllerInput& input) {
+    begin_motion(input, direction_, target_height_);
+    state_ = ControlState::kManualHold;
+    const Command command = direction_ > 0 ? Command::kUpHold
+                                           : Command::kDownHold;
+    return output(command, TransitionReason::kClassifiedHold);
+}
+
 void DeskController::begin_motion(const ControllerInput& input, int direction,
                                   std::uint16_t target_height) {
     direction_ = direction;
@@ -178,6 +192,9 @@ ControllerOutput DeskController::update(const ControllerInput& input) {
 
             begin_dial_classification(input, input.dial_direction, reports,
                                       config_.full_settle_frames);
+            if (hold_classification_ready()) {
+                return begin_manual_hold(input);
+            }
             return output(command, TransitionReason::kDialStarted);
         }
 
@@ -208,20 +225,17 @@ ControllerOutput DeskController::update(const ControllerInput& input) {
                     command,
                     TransitionReason::kUnexpectedControllerFrame);
             }
+            if (hold_classification_ready()) {
+                // Continued rotation is no longer ambiguous.  Start HOLD
+                // immediately instead of waiting out the STEP deadline.
+                return begin_manual_hold(input);
+            }
             if (!elapsed(input.now_ms, motion_start_ms_,
                          config_.classify_ms)) {
                 return output(command, reason);
             }
 
             begin_motion(input, direction_, target_height_);
-            if (allow_hold_ &&
-                gesture_event_count_ >= config_.hold_escalation_reports) {
-                state_ = ControlState::kManualHold;
-                command = direction_ > 0 ? Command::kUpHold
-                                         : Command::kDownHold;
-                return output(command,
-                              TransitionReason::kClassifiedHold);
-            }
             state_ = ControlState::kManualStep;
             command = direction_ > 0 ? Command::kUpStep
                                      : Command::kDownStep;
@@ -394,6 +408,9 @@ ControllerOutput DeskController::update(const ControllerInput& input) {
                 if (can_rearm) {
                     begin_dial_classification(input, input.dial_direction,
                                               reports, required_frames);
+                    if (hold_classification_ready()) {
+                        return begin_manual_hold(input);
+                    }
                     return output(command,
                                   TransitionReason::kDialStarted);
                 }

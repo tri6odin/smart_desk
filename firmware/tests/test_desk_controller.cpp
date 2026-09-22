@@ -52,13 +52,26 @@ void test_slow_detent_is_one_autonomous_step() {
     CHECK(result.state == ControlState::kDialClassify);
     CHECK(result.command == Command::kIdle);
 
-    input.now_ms = 100;
+    // One physical detent can produce two press reports.  It must still be a
+    // STEP, not a HOLD.
+    input.now_ms = 80;
+    add_dial(input, 2, +1, 80);
+    result = controller.update(input);
+    CHECK(result.state == ControlState::kDialClassify);
+    CHECK(result.command == Command::kIdle);
+
+    input.now_ms = 299;
+    result = controller.update(input);
+    CHECK(result.state == ControlState::kDialClassify);
+    CHECK(result.command == Command::kIdle);
+
+    input.now_ms = 300;
     result = controller.update(input);
     CHECK(result.state == ControlState::kManualStep);
     CHECK(result.command == Command::kUpStep);
     CHECK(result.reason == TransitionReason::kClassifiedStep);
 
-    input.now_ms = 300;
+    input.now_ms = 500;
     input.height_tenths_cm = 1004;
     input.telemetry_settled = false;
     input.telemetry_stable_frames = 0;
@@ -66,7 +79,7 @@ void test_slow_detent_is_one_autonomous_step() {
     CHECK(result.state == ControlState::kManualStep);
     CHECK(result.command == Command::kIdle);
 
-    input.now_ms = 700;
+    input.now_ms = 900;
     input.height_tenths_cm = 1010;
     input.telemetry_settled = true;
     result = controller.update(input);
@@ -75,19 +88,22 @@ void test_slow_detent_is_one_autonomous_step() {
     CHECK(result.reason == TransitionReason::kStepComplete);
 }
 
-void test_fast_rotation_enters_hold_without_step() {
+void test_moderate_rotation_enters_hold_on_third_report_without_step() {
     DeskController controller;
     auto input = stable_input(0, 1000);
     add_dial(input, 1, +1, 0);
     controller.update(input);
 
-    input.now_ms = 80;
-    add_dial(input, 4, +1, 80);
+    input.now_ms = 100;
+    add_dial(input, 2, +1, 100);
     auto result = controller.update(input);
     CHECK(result.state == ControlState::kDialClassify);
     CHECK(result.command == Command::kIdle);
 
-    input.now_ms = 100;
+    // The measured D100H can pause for about 270 ms before continued reports.
+    // Report three proves rotation and starts HOLD immediately, without STEP.
+    input.now_ms = 270;
+    add_dial(input, 3, +1, 270);
     result = controller.update(input);
     CHECK(result.state == ControlState::kManualHold);
     CHECK(result.command == Command::kUpHold);
@@ -212,17 +228,17 @@ void test_step_with_never_settled_telemetry_has_deadline() {
     auto input = stable_input(0, 1000);
     add_dial(input, 1, +1, 0);
     controller.update(input);
-    input.now_ms = 100;
+    input.now_ms = 300;
     controller.update(input);
 
-    input.now_ms = 300;
+    input.now_ms = 500;
     input.height_tenths_cm = 1005;
     input.telemetry_settled = false;
     input.telemetry_stable_frames = 0;
     auto result = controller.update(input);
     CHECK(result.state == ControlState::kManualStep);
 
-    input.now_ms = 5100;
+    input.now_ms = 5300;
     input.height_tenths_cm = 1010;
     result = controller.update(input);
     CHECK(result.state == ControlState::kSettling);
@@ -236,17 +252,17 @@ void test_reports_arriving_as_step_completes_are_not_queued() {
     add_dial(input, 1, +1, 0);
     controller.update(input);
 
-    input.now_ms = 100;
+    input.now_ms = 300;
     controller.update(input);
 
-    input.now_ms = 700;
+    input.now_ms = 900;
     input.height_tenths_cm = 1010;
     add_dial(input, 3, +1, 700);
     auto result = controller.update(input);
     CHECK(result.state == ControlState::kIdle);
     CHECK(result.reason == TransitionReason::kStepComplete);
 
-    input.now_ms = 800;
+    input.now_ms = 1000;
     result = controller.update(input);
     CHECK(result.state == ControlState::kIdle);
     CHECK(result.command == Command::kIdle);
@@ -342,7 +358,7 @@ void test_same_direction_gesture_rearms_after_quiet_and_three_frames() {
     CHECK(result.state == ControlState::kDialClassify);
     CHECK(result.reason == TransitionReason::kDialStarted);
 
-    input.now_ms = 1100;
+    input.now_ms = 1300;
     result = controller.update(input);
     CHECK(result.state == ControlState::kManualStep);
     CHECK(result.command == Command::kUpStep);
@@ -459,10 +475,6 @@ void test_dial_sequence_wrap_is_counted_modulo_32_bits() {
     input.dial_direction = +1;
     input.last_dial_ms = 0;
     auto result = controller.update(input);
-    CHECK(result.state == ControlState::kDialClassify);
-
-    input.now_ms = 100;
-    result = controller.update(input);
     CHECK(result.state == ControlState::kManualHold);
     CHECK(result.command == Command::kUpHold);
 }
@@ -488,7 +500,7 @@ void test_stop_during_preset_does_not_queue_new_preset() {
 
 int main() {
     test_slow_detent_is_one_autonomous_step();
-    test_fast_rotation_enters_hold_without_step();
+    test_moderate_rotation_enters_hold_on_third_report_without_step();
     test_short_fast_spin_from_90_stops_after_input_silence();
     test_continuous_reports_keep_hold_live();
     test_reversal_stops_without_starting_opposite_motion();
