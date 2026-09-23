@@ -107,36 +107,41 @@ struct ControllerOutput {
 };
 
 class DeskController {
-public:
+   public:
     explicit DeskController(ControllerConfig config = {});
 
     ControllerOutput update(const ControllerInput& input);
 
     ControlState state() const { return state_; }
     int direction() const { return direction_; }
-    std::uint32_t consumed_dial_sequence() const {
-        return consumed_dial_sequence_;
-    }
+    std::uint32_t consumed_dial_sequence() const { return consumed_dial_sequence_; }
     const ControllerConfig& config() const { return config_; }
-    bool set_presets(std::uint16_t sit_tenths_cm,
-                     std::uint16_t stand_tenths_cm);
+    bool set_presets(std::uint16_t sit_tenths_cm, std::uint16_t stand_tenths_cm);
 
-private:
-    bool valid_height(const ControllerInput& input) const;
+    // Shared by persistence and runtime updates; does not modify state.
     bool valid_presets(std::uint16_t sit_tenths_cm,
                        std::uint16_t stand_tenths_cm) const;
-    bool elapsed(std::uint32_t now, std::uint32_t since,
-                 std::uint32_t duration) const;
+
+   private:
+    bool valid_height(const ControllerInput& input) const;
+    bool elapsed(std::uint32_t now, std::uint32_t since, std::uint32_t duration) const;
     std::uint32_t consume_dial_reports(const ControllerInput& input);
     bool full_step_inside_soft_limits(const ControllerInput& input,
                                       int direction) const;
-    void begin_dial_classification(const ControllerInput& input,
-                                   int direction, std::uint32_t reports,
+    void begin_dial_classification(const ControllerInput& input, int direction,
+                                   std::uint32_t reports,
                                    std::uint32_t required_stable_frames);
+    bool at_braking_point(std::uint16_t height) const;
     bool hold_classification_ready() const;
+    ControllerOutput update_idle(const ControllerInput&, std::uint32_t reports);
+    ControllerOutput update_classify(const ControllerInput&, std::uint32_t reports);
+    ControllerOutput update_step(const ControllerInput&, std::uint32_t reports);
+    ControllerOutput update_hold(const ControllerInput&, std::uint32_t reports);
+    ControllerOutput update_settling(const ControllerInput&, std::uint32_t reports);
     ControllerOutput begin_manual_hold(const ControllerInput& input);
     void begin_motion(const ControllerInput& input, int direction,
                       std::uint16_t target_height);
+    void update_progress(const ControllerInput& input);
     void begin_settling(const ControllerInput& input);
     void become_idle();
     ControllerOutput output(Command command, TransitionReason reason) const;
@@ -156,7 +161,6 @@ private:
     std::uint32_t start_anomaly_sequence_ = 0;
     std::uint32_t required_start_stable_frames_ = 0;
     bool have_progress_ = false;
-    bool moved_ = false;
     bool allow_hold_ = true;
 };
 

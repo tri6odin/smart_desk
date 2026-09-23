@@ -498,7 +498,199 @@ void test_stop_during_preset_does_not_queue_new_preset() {
 
 }  // namespace
 
+void test_preset_consumes_overlapping_dial_even_when_rejected() {
+    for (const bool fresh : {false, true}) {
+        DeskController controller;
+        auto input = stable_input(0, 900);
+        add_dial(input, 1, +1, 0);
+        input.telemetry_fresh = fresh;
+        input.request = ControlRequest::kGoStand;
+        controller.update(input);
+        CHECK(controller.consumed_dial_sequence() == 1);
+
+        input.now_ms = 100;
+        input.telemetry_fresh = true;
+        input.request = ControlRequest::kNone;
+        const auto result = controller.update(input);
+        CHECK(result.state == (fresh ? ControlState::kPresetHold
+                                     : ControlState::kIdle));
+    }
+}
+
+void test_expired_dial_cannot_start_motion() {
+    for (const std::uint32_t count : {1U, 3U}) {
+        DeskController controller;
+        auto input = stable_input(1000, 900);
+        add_dial(input, count, +1, 600);
+        const auto result = controller.update(input);
+        CHECK(result.command == Command::kIdle);
+        CHECK(result.state == ControlState::kIdle);
+        CHECK(controller.consumed_dial_sequence() == count);
+    }
+}
+
+void test_preset_does_not_pulse_hold_inside_braking_zone() {
+    for (const auto request : {ControlRequest::kGoSit, ControlRequest::kGoStand}) {
+        DeskController controller;
+        auto input = stable_input(0, request == ControlRequest::kGoSit ? 815 : 1130);
+        input.request = request;
+        CHECK(controller.update(input).command == Command::kIdle);
+    }
+}
+
+void test_classification_rechecks_limits_before_step() {
+    DeskController controller;
+    auto input = stable_input(0, 1190);
+    add_dial(input, 1, +1, 0);
+    controller.update(input);
+    input.now_ms = 300;
+    input.height_tenths_cm = 1195;
+    CHECK(controller.update(input).command == Command::kIdle);
+}
+
+void test_step_survives_normal_writer_sampling_delay() {
+    DeskController controller;
+    auto input = stable_input(90, 900);
+    add_dial(input, 1, +1, 0);
+    CHECK(controller.update(input).state == ControlState::kDialClassify);
+    input.now_ms = 390;
+    CHECK(controller.update(input).command == Command::kUpStep);
+}
+
+void test_invalid_height_stops_hold_in_both_directions() {
+    for (const int direction : {-1, +1}) {
+        DeskController controller;
+        auto input = stable_input(0, 900);
+        add_dial(input, 3, direction, 0);
+        controller.update(input);
+        input.now_ms = 100;
+        input.height_tenths_cm = direction > 0 ? 699 : 1201;
+        CHECK(controller.update(input).command == Command::kIdle);
+    }
+}
+
+void test_stop_and_telemetry_failure_in_every_active_state() {
+    for (const int direction : {-1, +1}) {
+        for (const auto state : {ControlState::kDialClassify,
+                                ControlState::kManualStep,
+                                ControlState::kManualHold,
+                                ControlState::kPresetHold}) {
+            for (const int fault : {0, 1, 2}) {
+                DeskController controller;
+                auto input = stable_input(0, 900);
+                if (state == ControlState::kPresetHold) {
+                    input.request = direction > 0 ? ControlRequest::kGoStand
+                                                  : ControlRequest::kGoSit;
+                } else {
+                    add_dial(input, state == ControlState::kManualHold ? 3 : 1,
+                             direction, 0);
+                }
+                auto result = controller.update(input);
+                if (state == ControlState::kManualStep) {
+                    input.now_ms = 300;
+                    result = controller.update(input);
+                }
+                CHECK(result.state == state);
+                input.request = ControlRequest::kNone;
+                input.now_ms += 100;
+                if (fault == 0) input.stop_requested = true;
+                if (fault == 1) input.telemetry_fresh = false;
+                if (fault == 2) ++input.anomaly_sequence;
+                result = controller.update(input);
+                CHECK(result.command == Command::kIdle);
+                CHECK(result.state == ControlState::kIdle ||
+                      result.state == ControlState::kSettling);
+            }
+        }
+    }
+}
+
+void test_clock_wrap_preserves_classification_and_lease() {
+    DeskController controller;
+    auto input = stable_input(UINT32_MAX - 199, 900);
+    add_dial(input, 1, +1, input.now_ms);
+    controller.update(input);
+    input.now_ms = 100;  // 300 ms later, across wrap.
+    CHECK(controller.update(input).command == Command::kUpStep);
+
+    DeskController hold;
+    input = stable_input(UINT32_MAX - 199, 900);
+    add_dial(input, 3, +1, input.now_ms);
+    CHECK(hold.update(input).command == Command::kUpHold);
+    input.now_ms = 149;
+    CHECK(hold.update(input).command == Command::kUpHold);
+    input.now_ms = 150;  // Exactly 350 ms of silence.
+    CHECK(hold.update(input).reason == TransitionReason::kDialReleased);
+}
+
+void test_absolute_hold_deadlines_with_continued_progress() {
+    for (const bool manual : {false, true}) {
+        DeskController controller;
+        auto input = stable_input(0, 750);
+        if (manual) add_dial(input, 3, +1, 0);
+        else input.request = ControlRequest::kGoStand;
+        CHECK(controller.update(input).command == Command::kUpHold);
+        input.request = ControlRequest::kNone;
+        const std::uint32_t deadline = manual ? 30000 : 20000;
+        for (input.now_ms = 100; input.now_ms < deadline; input.now_ms += 100) {
+            ++input.height_tenths_cm;
+            if (manual) add_dial(input, input.dial_sequence + 1, +1, input.now_ms);
+            CHECK(controller.update(input).command == Command::kUpHold);
+        }
+        ++input.height_tenths_cm;
+        if (manual) add_dial(input, input.dial_sequence + 1, +1, input.now_ms);
+        const auto result = controller.update(input);
+        CHECK(result.command == Command::kIdle);
+        CHECK(result.reason == (manual ? TransitionReason::kManualWatchdog
+                                       : TransitionReason::kPresetWatchdog));
+    }
+}
+
+void test_generated_input_sequences_preserve_safety_invariants() {
+    // Deterministic simulated input stress; this is not a mechanical soak test.
+    std::uint32_t seed = 0xC0FFEE;
+    const auto next = [&seed]() {
+        seed = seed * 1664525U + 1013904223U;
+        return seed;
+    };
+    DeskController controller;
+    auto input = stable_input(UINT32_MAX - 10000, 900);
+    for (unsigned i = 0; i < 200000; ++i) {
+        input.now_ms += next() % 401;
+        input.height_tenths_cm = static_cast<std::uint16_t>(690 + next() % 521);
+        input.telemetry_fresh = next() % 8 != 0;
+        input.telemetry_stable_frames = next() % 6;
+        input.telemetry_settled = input.telemetry_stable_frames == 5;
+        input.stop_requested = next() % 13 == 0;
+        input.request = static_cast<ControlRequest>(next() % 3);
+        if (next() % 5 == 0) ++input.anomaly_sequence;
+        if (next() % 3 != 0) {
+            add_dial(input, input.dial_sequence + 1 + next() % 4,
+                     next() % 2 == 0 ? 1 : -1, input.now_ms);
+        }
+        const auto result = controller.update(input);
+        CHECK(controller.consumed_dial_sequence() == input.dial_sequence);
+        if (result.command != Command::kIdle) {
+            CHECK(!input.stop_requested);
+            CHECK(input.telemetry_fresh);
+            CHECK(input.height_tenths_cm >= 700 && input.height_tenths_cm <= 1200);
+            if (result.command == Command::kUpStep) CHECK(input.height_tenths_cm <= 1190);
+            if (result.command == Command::kDownStep) CHECK(input.height_tenths_cm >= 710);
+        }
+    }
+}
+
 int main() {
+    test_stop_and_telemetry_failure_in_every_active_state();
+    test_clock_wrap_preserves_classification_and_lease();
+    test_absolute_hold_deadlines_with_continued_progress();
+    test_generated_input_sequences_preserve_safety_invariants();
+    test_preset_consumes_overlapping_dial_even_when_rejected();
+    test_expired_dial_cannot_start_motion();
+    test_preset_does_not_pulse_hold_inside_braking_zone();
+    test_classification_rechecks_limits_before_step();
+    test_step_survives_normal_writer_sampling_delay();
+    test_invalid_height_stops_hold_in_both_directions();
     test_slow_detent_is_one_autonomous_step();
     test_moderate_rotation_enters_hold_on_third_report_without_step();
     test_short_fast_spin_from_90_stops_after_input_silence();

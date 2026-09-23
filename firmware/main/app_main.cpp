@@ -2,23 +2,19 @@
 #include <atomic>
 #include <cstdint>
 
-#include "desk_controller.hpp"
 #include "desk_protocol.hpp"
 #include "ble_hid_logger.hpp"
 #include "driver/gpio.h"
-#include "driver/uart.h"
+#include "uart_transport.hpp"
 #include "esp_log.h"
-#include "esp_system.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/task.h"
-#include "nvs.h"
 #include "sdkconfig.h"
 
 namespace {
 
 constexpr int kPanelToControllerRxGpio = 17;
 constexpr int kControllerToPanelRxGpio = 18;
-constexpr int kBaudRate = 9600;
 constexpr TickType_t kPanelPeriod = pdMS_TO_TICKS(100);
 
 struct ReaderConfig {
@@ -35,18 +31,21 @@ ReaderConfig kPanelReader{UART_NUM_1, kPanelToControllerRxGpio,
 ReaderConfig kControllerReader{UART_NUM_2, kControllerToPanelRxGpio,
                                smart_desk::Direction::kControllerToPanel,
                                "desk.controller"};
-#elif CONFIG_DESK_MODE_IDLE_EMULATOR || CONFIG_DESK_MODE_STEP_DOWN_TEST || \
-    CONFIG_DESK_MODE_HOLD_DOWN_TEST || CONFIG_DESK_MODE_BLE_HID_LOGGER || \
-    CONFIG_DESK_MODE_BLE_ONE_SHOT_TEST || CONFIG_DESK_MODE_BLE_CALIBRATION || \
-    CONFIG_DESK_MODE_BLE_CONTROLLER
+#elif CONFIG_DESK_MODE_IDLE_EMULATOR || \
+    CONFIG_DESK_MODE_STEP_DOWN_TEST || \
+    CONFIG_DESK_MODE_HOLD_DOWN_TEST || \
+    CONFIG_DESK_MODE_BLE_HID_LOGGER || \
+    CONFIG_DESK_MODE_BLE_ONE_SHOT_TEST || \
+    CONFIG_DESK_MODE_BLE_CALIBRATION
 ReaderConfig kEmulatorReader{UART_NUM_1, kControllerToPanelRxGpio,
                              smart_desk::Direction::kControllerToPanel,
                              "desk.controller"};
 #endif
 
-#if CONFIG_DESK_MODE_STEP_DOWN_TEST || CONFIG_DESK_MODE_HOLD_DOWN_TEST || \
-    CONFIG_DESK_MODE_BLE_ONE_SHOT_TEST || CONFIG_DESK_MODE_BLE_CALIBRATION || \
-    CONFIG_DESK_MODE_BLE_CONTROLLER
+#if CONFIG_DESK_MODE_STEP_DOWN_TEST || \
+    CONFIG_DESK_MODE_HOLD_DOWN_TEST || \
+    CONFIG_DESK_MODE_BLE_ONE_SHOT_TEST || \
+    CONFIG_DESK_MODE_BLE_CALIBRATION
 constexpr std::uint16_t kTestMinHeightTenthsCm = 1100;
 constexpr std::uint16_t kTestMaxHeightTenthsCm = 1200;
 constexpr TickType_t kTelemetryMaxAge = pdMS_TO_TICKS(500);
@@ -56,37 +55,12 @@ std::atomic<TickType_t> g_height_tick{0};
 std::atomic<bool> g_have_height{false};
 std::atomic<std::uint32_t> g_consistent_height_frames{0};
 std::atomic<std::uint32_t> g_anomaly_sequence{0};
-#if CONFIG_DESK_MODE_BLE_CONTROLLER
-portMUX_TYPE g_telemetry_mux = portMUX_INITIALIZER_UNLOCKED;
-
-struct TelemetrySnapshot {
-    std::uint16_t height_tenths_cm;
-    TickType_t tick;
-    bool have_height;
-    std::uint32_t consistent_frames;
-    std::uint32_t anomaly_sequence;
-};
-
-TelemetrySnapshot read_telemetry() {
-    portENTER_CRITICAL(&g_telemetry_mux);
-    const TelemetrySnapshot snapshot{
-        g_height_tenths_cm.load(),
-        g_height_tick.load(),
-        g_have_height.load(),
-        g_consistent_height_frames.load(),
-        g_anomaly_sequence.load(),
-    };
-    portEXIT_CRITICAL(&g_telemetry_mux);
-    return snapshot;
-}
-#endif
 #endif
 
 #if CONFIG_DESK_MODE_STEP_DOWN_TEST
 std::atomic<bool> g_step_requested{false};
 std::atomic<bool> g_step_used{false};
 #endif
-
 
 #if CONFIG_DESK_MODE_HOLD_DOWN_TEST
 constexpr TickType_t kHoldMaxDuration = pdMS_TO_TICKS(2500);
@@ -96,8 +70,7 @@ constexpr std::uint16_t kHoldMaxTravelTenthsCm = 30;
 std::atomic<bool> g_boot_pressed{false};
 #endif
 
-#if CONFIG_DESK_MODE_BLE_ONE_SHOT_TEST || CONFIG_DESK_MODE_BLE_CALIBRATION || \
-    CONFIG_DESK_MODE_BLE_CONTROLLER
+#if CONFIG_DESK_MODE_BLE_ONE_SHOT_TEST || CONFIG_DESK_MODE_BLE_CALIBRATION
 constexpr std::uint16_t kBleTestMinHeightTenthsCm = 750;
 constexpr std::uint16_t kBleTestMaxHeightTenthsCm = 1150;
 constexpr TickType_t kBleTelemetryMaxAge = pdMS_TO_TICKS(300);
@@ -120,46 +93,11 @@ std::atomic<bool> g_ble_accept_input{true};
 std::atomic<TickType_t> g_ble_last_raw_tick{0};
 #endif
 
-#if CONFIG_DESK_MODE_BLE_CONTROLLER
-enum class ControllerRequest : int {
-    kNone,
-    kGoSit,
-    kGoStand,
-    kSaveSit,
-    kSaveStand,
-};
-
-struct BleDialSnapshot {
-    std::uint32_t sequence = 0;
-    int direction = 0;
-    TickType_t tick = 0;
-};
-
-portMUX_TYPE g_ble_dial_mux = portMUX_INITIALIZER_UNLOCKED;
-BleDialSnapshot g_ble_dial;
-std::atomic<ControllerRequest> g_controller_request{ControllerRequest::kNone};
-std::atomic<std::uint32_t> g_panel_heartbeat{0};
-
-BleDialSnapshot read_ble_dial() {
-    portENTER_CRITICAL(&g_ble_dial_mux);
-    const BleDialSnapshot snapshot = g_ble_dial;
-    portEXIT_CRITICAL(&g_ble_dial_mux);
-    return snapshot;
-}
-#endif
-
 void ble_motion_action(const BleHidAction& action, void*) {
     switch (action.type) {
         case BleHidActionType::kDialRaw: {
 #if CONFIG_DESK_MODE_BLE_CALIBRATION
             g_ble_last_raw_tick.store(xTaskGetTickCount());
-#elif CONFIG_DESK_MODE_BLE_CONTROLLER
-            const TickType_t tick = xTaskGetTickCount();
-            portENTER_CRITICAL(&g_ble_dial_mux);
-            g_ble_dial.tick = tick;
-            g_ble_dial.direction = action.value;
-            ++g_ble_dial.sequence;
-            portEXIT_CRITICAL(&g_ble_dial_mux);
 #endif
             const int active_direction = g_ble_active_direction.load();
             if (active_direction != 0 && action.value != active_direction) {
@@ -198,42 +136,14 @@ void ble_motion_action(const BleHidAction& action, void*) {
         case BleHidActionType::kDisconnected:
             g_ble_stop_requested.store(true);
             g_ble_pending_delta_cm.store(0);
-#if CONFIG_DESK_MODE_BLE_CONTROLLER
-            g_controller_request.store(ControllerRequest::kNone);
-#endif
             break;
         case BleHidActionType::kGoSit:
-#if CONFIG_DESK_MODE_BLE_CONTROLLER
-            if (g_ble_active_direction.load() == 0) {
-                g_controller_request.store(ControllerRequest::kGoSit);
-            } else {
-                g_ble_stop_requested.store(true);
-            }
-            break;
-#endif
         case BleHidActionType::kGoStand:
-#if CONFIG_DESK_MODE_BLE_CONTROLLER
-            if (g_ble_active_direction.load() == 0) {
-                g_controller_request.store(ControllerRequest::kGoStand);
-            } else {
-                g_ble_stop_requested.store(true);
-            }
-            break;
-#endif
         case BleHidActionType::kSaveSit:
-#if CONFIG_DESK_MODE_BLE_CONTROLLER
-            g_controller_request.store(ControllerRequest::kSaveSit);
-            break;
-#endif
         case BleHidActionType::kSaveStand:
-#if CONFIG_DESK_MODE_BLE_CONTROLLER
-            g_controller_request.store(ControllerRequest::kSaveStand);
-            break;
-#else
             ESP_LOGW("desk.ble_test",
                      "preset action ignored in one-shot motion test");
             break;
-#endif
     }
 }
 #endif
@@ -278,9 +188,10 @@ void reader_task(void* raw_config) {
                 continue;
             }
 
-#if CONFIG_DESK_MODE_STEP_DOWN_TEST || CONFIG_DESK_MODE_HOLD_DOWN_TEST || \
-    CONFIG_DESK_MODE_BLE_ONE_SHOT_TEST || CONFIG_DESK_MODE_BLE_CALIBRATION || \
-    CONFIG_DESK_MODE_BLE_CONTROLLER
+#if CONFIG_DESK_MODE_STEP_DOWN_TEST || \
+    CONFIG_DESK_MODE_HOLD_DOWN_TEST || \
+    CONFIG_DESK_MODE_BLE_ONE_SHOT_TEST || \
+    CONFIG_DESK_MODE_BLE_CALIBRATION
             if (config.direction ==
                 smart_desk::Direction::kControllerToPanel) {
                 const auto message =
@@ -294,9 +205,6 @@ void reader_task(void* raw_config) {
                     normal_status && message->flags == 0x00 &&
                     message->height_tenths_cm >= 700 &&
                     message->height_tenths_cm <= 1300;
-#if CONFIG_DESK_MODE_BLE_CONTROLLER
-                portENTER_CRITICAL(&g_telemetry_mux);
-#endif
                 if (normal_height) {
                     const std::uint16_t previous_height =
                         g_height_tenths_cm.load();
@@ -322,9 +230,6 @@ void reader_task(void* raw_config) {
                     g_consistent_height_frames.store(0);
                     g_anomaly_sequence.fetch_add(1);
                 }
-#if CONFIG_DESK_MODE_BLE_CONTROLLER
-                portEXIT_CRITICAL(&g_telemetry_mux);
-#endif
             }
 #endif
 
@@ -339,83 +244,12 @@ void reader_task(void* raw_config) {
     }
 }
 
-void configure_uart(uart_port_t uart, int tx_gpio, int rx_gpio) {
-    const uart_config_t uart_config{
-        .baud_rate = kBaudRate,
-        .data_bits = UART_DATA_8_BITS,
-        .parity = UART_PARITY_DISABLE,
-        .stop_bits = UART_STOP_BITS_1,
-        .flow_ctrl = UART_HW_FLOWCTRL_DISABLE,
-        .rx_flow_ctrl_thresh = 0,
-        .rx_glitch_filt_thresh = 0,
-        .source_clk = UART_SCLK_DEFAULT,
-        .flags = {},
-    };
-
-    ESP_ERROR_CHECK(uart_driver_install(uart, 1024, 0, 0, nullptr, 0));
-    ESP_ERROR_CHECK(uart_param_config(uart, &uart_config));
-    ESP_ERROR_CHECK(uart_set_pin(uart, tx_gpio, rx_gpio,
-                                 UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));
-    ESP_ERROR_CHECK(gpio_set_pull_mode(static_cast<gpio_num_t>(rx_gpio),
-                                       GPIO_FLOATING));
-}
-
-#if CONFIG_DESK_MODE_BLE_CONTROLLER
-struct DeskPresets {
-    std::uint16_t sit = 800;
-    std::uint16_t stand = 1150;
-};
-
-constexpr std::uint16_t kPhysicalMinTenthsCm = 700;
-constexpr std::uint16_t kPhysicalMaxTenthsCm = 1200;
-constexpr std::uint16_t kMinimumPresetGapTenthsCm = 100;
-
-bool valid_presets(const DeskPresets& presets) {
-    return presets.sit >= kPhysicalMinTenthsCm &&
-           presets.stand <= kPhysicalMaxTenthsCm &&
-           presets.sit + kMinimumPresetGapTenthsCm <= presets.stand;
-}
-
-DeskPresets load_presets() {
-    DeskPresets presets;
-    nvs_handle_t handle = 0;
-    if (nvs_open("desk", NVS_READONLY, &handle) == ESP_OK) {
-        DeskPresets stored;
-        const esp_err_t sit_result = nvs_get_u16(handle, "sit", &stored.sit);
-        const esp_err_t stand_result =
-            nvs_get_u16(handle, "stand", &stored.stand);
-        nvs_close(handle);
-        if (sit_result == ESP_OK && stand_result == ESP_OK &&
-            valid_presets(stored)) {
-            presets = stored;
-        }
-    }
-    ESP_LOGW("desk.control", "SIT=%u.%u cm STAND=%u.%u cm limits=70.0..120.0",
-             presets.sit / 10, presets.sit % 10,
-             presets.stand / 10, presets.stand % 10);
-    return presets;
-}
-
-bool save_presets(const DeskPresets& presets) {
-    if (!valid_presets(presets)) {
-        return false;
-    }
-    nvs_handle_t handle = 0;
-    if (nvs_open("desk", NVS_READWRITE, &handle) != ESP_OK) {
-        return false;
-    }
-    const bool ok = nvs_set_u16(handle, "sit", presets.sit) == ESP_OK &&
-                    nvs_set_u16(handle, "stand", presets.stand) == ESP_OK &&
-                    nvs_commit(handle) == ESP_OK;
-    nvs_close(handle);
-    return ok;
-}
-#endif
-
-#if CONFIG_DESK_MODE_IDLE_EMULATOR || CONFIG_DESK_MODE_STEP_DOWN_TEST || \
-    CONFIG_DESK_MODE_HOLD_DOWN_TEST || CONFIG_DESK_MODE_BLE_HID_LOGGER || \
-    CONFIG_DESK_MODE_BLE_ONE_SHOT_TEST || CONFIG_DESK_MODE_BLE_CALIBRATION || \
-    CONFIG_DESK_MODE_BLE_CONTROLLER
+#if CONFIG_DESK_MODE_IDLE_EMULATOR || \
+    CONFIG_DESK_MODE_STEP_DOWN_TEST || \
+    CONFIG_DESK_MODE_HOLD_DOWN_TEST || \
+    CONFIG_DESK_MODE_BLE_HID_LOGGER || \
+    CONFIG_DESK_MODE_BLE_ONE_SHOT_TEST || \
+    CONFIG_DESK_MODE_BLE_CALIBRATION
 void panel_writer_task(void*) {
     const auto idle = smart_desk::make_panel_frame(smart_desk::Command::kIdle);
 #if CONFIG_DESK_MODE_STEP_DOWN_TEST
@@ -467,23 +301,6 @@ void panel_writer_task(void*) {
     TickType_t progress_tick = 0;
     TickType_t settle_start_tick = 0;
     std::uint32_t start_anomaly_sequence = 0;
-#endif
-#if CONFIG_DESK_MODE_BLE_CONTROLLER
-    constexpr std::uint32_t kProductionSettledFrames = 5;
-    DeskPresets presets = load_presets();
-    smart_desk::ControllerConfig controller_config;
-    controller_config.soft_min_tenths_cm = kPhysicalMinTenthsCm;
-    controller_config.soft_max_tenths_cm = kPhysicalMaxTenthsCm;
-    controller_config.sit_target_tenths_cm = presets.sit;
-    controller_config.stand_target_tenths_cm = presets.stand;
-    smart_desk::DeskController controller(controller_config);
-
-    // Ignore any BLE reports received while this task was being created.
-    smart_desk::ControllerInput initial_input;
-    initial_input.dial_sequence = read_ble_dial().sequence;
-    initial_input.stop_requested = true;
-    controller.update(initial_input);
-    smart_desk::ControlState logged_state = controller.state();
 #endif
 #if CONFIG_DESK_MODE_BLE_ONE_SHOT_TEST
     const auto down_hold =
@@ -717,112 +534,6 @@ void panel_writer_task(void*) {
         }
 #endif
 
-#if CONFIG_DESK_MODE_BLE_CONTROLLER
-        const TickType_t control_now_tick = xTaskGetTickCount();
-        const std::uint32_t control_now_ms =
-            static_cast<std::uint32_t>(control_now_tick) * portTICK_PERIOD_MS;
-        const TelemetrySnapshot telemetry = read_telemetry();
-        const BleDialSnapshot dial = read_ble_dial();
-        const std::uint16_t control_height = telemetry.height_tenths_cm;
-        const bool control_fresh =
-            telemetry.have_height &&
-            control_now_tick - telemetry.tick <= kBleTelemetryMaxAge;
-        const bool control_settled =
-            telemetry.consistent_frames >= kProductionSettledFrames;
-        const ControllerRequest raw_request =
-            g_controller_request.exchange(ControllerRequest::kNone);
-        bool stop_requested = g_ble_stop_requested.exchange(false);
-
-        ControllerRequest request = raw_request;
-        if (controller.state() != smart_desk::ControlState::kIdle &&
-            request != ControllerRequest::kNone) {
-            ESP_LOGW("desk.control",
-                     "button during motion -> STOP; action not queued");
-            stop_requested = true;
-            request = ControllerRequest::kNone;
-        }
-
-        if (controller.state() == smart_desk::ControlState::kIdle &&
-            !stop_requested &&
-            (request == ControllerRequest::kSaveSit ||
-             request == ControllerRequest::kSaveStand)) {
-            if (!control_fresh || !control_settled ||
-                control_height < kPhysicalMinTenthsCm ||
-                control_height > kPhysicalMaxTenthsCm) {
-                ESP_LOGE("desk.control",
-                         "preset save BLOCKED: fresh=%d settled=%d height=%u.%u",
-                         control_fresh, control_settled,
-                         control_height / 10, control_height % 10);
-            } else {
-                DeskPresets candidate = presets;
-                if (request == ControllerRequest::kSaveSit) {
-                    candidate.sit = control_height;
-                } else {
-                    candidate.stand = control_height;
-                }
-                if (!valid_presets(candidate)) {
-                    ESP_LOGE("desk.control",
-                             "preset save BLOCKED: require 70..120 cm and SIT+10<=STAND");
-                } else if (!save_presets(candidate)) {
-                    ESP_LOGE("desk.control", "preset save failed in NVS");
-                } else if (!controller.set_presets(candidate.sit,
-                                                   candidate.stand)) {
-                    ESP_LOGE("desk.control",
-                             "internal preset validation disagrees with NVS");
-                } else {
-                    presets = candidate;
-                    ESP_LOGW("desk.control",
-                             "saved SIT=%u.%u STAND=%u.%u cm; limits unchanged at 70.0..120.0",
-                             presets.sit / 10, presets.sit % 10,
-                             presets.stand / 10, presets.stand % 10);
-                }
-            }
-            request = ControllerRequest::kNone;
-        }
-
-        smart_desk::ControlRequest motion_request =
-            smart_desk::ControlRequest::kNone;
-        if (request == ControllerRequest::kGoSit) {
-            motion_request = smart_desk::ControlRequest::kGoSit;
-        } else if (request == ControllerRequest::kGoStand) {
-            motion_request = smart_desk::ControlRequest::kGoStand;
-        }
-
-        smart_desk::ControllerInput controller_input;
-        controller_input.now_ms = control_now_ms;
-        controller_input.height_tenths_cm = control_height;
-        controller_input.telemetry_fresh = control_fresh;
-        controller_input.telemetry_settled = control_settled;
-        controller_input.telemetry_stable_frames =
-            telemetry.consistent_frames;
-        controller_input.anomaly_sequence = telemetry.anomaly_sequence;
-        controller_input.dial_sequence = dial.sequence;
-        controller_input.dial_direction = dial.direction;
-        controller_input.last_dial_ms =
-            static_cast<std::uint32_t>(dial.tick) * portTICK_PERIOD_MS;
-        controller_input.stop_requested = stop_requested;
-        controller_input.request = motion_request;
-
-        const smart_desk::ControllerOutput controller_output =
-            controller.update(controller_input);
-        g_ble_active_direction.store(controller.direction());
-
-        if (controller_output.reason != smart_desk::TransitionReason::kNone ||
-            controller_output.state != logged_state) {
-            ESP_LOGW("desk.control", "%s -> %s: %s at %u.%u cm",
-                     smart_desk::control_state_name(logged_state),
-                     smart_desk::control_state_name(controller_output.state),
-                     smart_desk::transition_reason_name(
-                         controller_output.reason),
-                     control_height / 10, control_height % 10);
-            logged_state = controller_output.state;
-        }
-
-        const auto controller_frame =
-            smart_desk::make_panel_frame(controller_output.command);
-        outgoing = &controller_frame;
-#endif
-
 #if CONFIG_DESK_MODE_HOLD_DOWN_TEST
         const TickType_t now = xTaskGetTickCount();
         const std::uint16_t height = g_height_tenths_cm.load();
@@ -1009,37 +720,8 @@ void panel_writer_task(void*) {
                                              outgoing->size());
         if (written != static_cast<int>(outgoing->size())) {
             ESP_LOGE("desk.idle", "UART write failed: %d/8 bytes", written);
-#if CONFIG_DESK_MODE_BLE_CONTROLLER
-        } else {
-            g_panel_heartbeat.fetch_add(1);
-#endif
         }
         xTaskDelayUntil(&last_wake, kPanelPeriod);
-    }
-}
-#endif
-
-#if CONFIG_DESK_MODE_BLE_CONTROLLER
-void panel_watchdog_task(void*) {
-    std::uint32_t previous = g_panel_heartbeat.load();
-    unsigned missed_seconds = 0;
-
-    while (true) {
-        vTaskDelay(pdMS_TO_TICKS(1000));
-        const std::uint32_t current = g_panel_heartbeat.load();
-        if (current != previous) {
-            previous = current;
-            missed_seconds = 0;
-            continue;
-        }
-
-        ++missed_seconds;
-        ESP_LOGE("desk.watchdog", "panel writer heartbeat missing: %u s",
-                 missed_seconds);
-        if (missed_seconds >= 3) {
-            ESP_LOGE("desk.watchdog", "panel writer stalled; restarting ESP");
-            esp_restart();
-        }
     }
 }
 #endif
@@ -1165,24 +847,6 @@ extern "C" void app_main() {
                 nullptr);
     xTaskCreate(panel_writer_task, "panel_tx", 5120, nullptr, 5, nullptr);
     start_ble_hid_logger(ble_motion_action, nullptr);
-#elif CONFIG_DESK_MODE_BLE_CONTROLLER
-    ESP_LOGW("smart_desk",
-             "BLE CONTROLLER; original panel must be disconnected");
-    ESP_LOGW("smart_desk",
-             "SIT=80 cm, STAND=115 cm, limits=70..120 cm; no queue");
-    ESP_LOGI("smart_desk", "GPIO17=TX; GPIO18=height RX");
-
-    configure_uart(UART_NUM_1, kPanelToControllerRxGpio,
-                   kControllerToPanelRxGpio);
-    // BLE initialization owns NVS initialization. Start the writer afterwards
-    // so its persisted preset read cannot race nvs_flash_init().
-    start_ble_hid_logger(ble_motion_action, nullptr, false);
-    configASSERT(xTaskCreate(reader_task, "controller_rx", 4096,
-                             &kEmulatorReader, 5, nullptr) == pdPASS);
-    configASSERT(xTaskCreate(panel_writer_task, "panel_tx", 6144, nullptr, 5,
-                             nullptr) == pdPASS);
-    configASSERT(xTaskCreate(panel_watchdog_task, "panel_watchdog", 2048,
-                             nullptr, 6, nullptr) == pdPASS);
 #else
 #error "Select a smart desk firmware mode"
 #endif

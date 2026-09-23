@@ -59,9 +59,9 @@ config DESK_MODE_BLE_CALIBRATION
 config DESK_MODE_BLE_CONTROLLER
     bool "BLE production controller"
     help
-        Replaces the original panel. The first dial event moves immediately;
-        continued rotation becomes a leased HOLD with no movement queue.
-        SIT/STAND are ESP-owned absolute targets and software limits. Dial
+        Replaces the original panel. One or two reports become STEP after
+        300 ms; the third report starts a leased HOLD with no movement queue.
+        SIT/STAND are ESP-owned targets independent of software limits. Dial
         press, reversal, telemetry failure or BLE disconnect sends IDLE.
         Disconnect the original panel first.
 

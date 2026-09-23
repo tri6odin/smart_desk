@@ -41,7 +41,8 @@ std::atomic<bool> g_have_candidate{false};
 std::atomic<bool> g_connected{false};
 std::atomic<bool> g_open_pending{false};
 std::array<esp_ble_bond_dev_t, kMaxBondedDevices> g_bonded_devices{};
-std::atomic<std::size_t> g_bonded_device_count{0};
+std::size_t g_bonded_device_count = 0;
+portMUX_TYPE g_bonds_lock = portMUX_INITIALIZER_UNLOCKED;
 bool g_publish_delayed_dial_delta = true;
 
 portMUX_TYPE g_semantic_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -93,10 +94,10 @@ void format_address(const std::uint8_t* address, char* output,
 }
 
 void refresh_bonded_devices() {
+    std::array<esp_ble_bond_dev_t, kMaxBondedDevices> devices{};
     int count = esp_ble_get_bond_device_num();
     if (count < 0) {
         ESP_LOGE(kTag, "could not read BLE bond count");
-        g_bonded_device_count.store(0);
         return;
     }
     if (count > static_cast<int>(g_bonded_devices.size())) {
@@ -105,20 +106,24 @@ void refresh_bonded_devices() {
     if (count != 0) {
         int requested = count;
         const esp_err_t result = esp_ble_get_bond_device_list(
-            &requested, g_bonded_devices.data());
+            &requested, devices.data());
         if (result != ESP_OK) {
             ESP_LOGE(kTag, "could not read BLE bonds: %s",
                      esp_err_to_name(result));
-            g_bonded_device_count.store(0);
             return;
         }
         count = requested;
     }
-    g_bonded_device_count.store(static_cast<std::size_t>(count));
+    // GAP and HID callbacks can run on different tasks. Publish the array and
+    // its length together; no BLE API or logging runs under the spinlock.
+    portENTER_CRITICAL(&g_bonds_lock);
+    g_bonded_devices = devices;
+    g_bonded_device_count = static_cast<std::size_t>(count);
+    portEXIT_CRITICAL(&g_bonds_lock);
     ESP_LOGI(kTag, "stored BLE bonds=%d", count);
     for (int index = 0; index < count; ++index) {
         char text[18] = {};
-        const auto& bond = g_bonded_devices[static_cast<std::size_t>(index)];
+        const auto& bond = devices[static_cast<std::size_t>(index)];
         format_address(bond.bd_addr, text, sizeof(text));
         ESP_LOGI(kTag, "bond[%d]=%s type=%u keys=0x%02x", index, text,
                  static_cast<unsigned>(bond.bd_addr_type),
@@ -127,17 +132,21 @@ void refresh_bonded_devices() {
 }
 
 bool matches_bonded_address(const std::uint8_t* address) {
-    const std::size_t count = g_bonded_device_count.load();
+    portENTER_CRITICAL(&g_bonds_lock);
+    const std::size_t count = g_bonded_device_count;
+    bool matched = false;
     for (std::size_t index = 0; index < count; ++index) {
         const auto& bond = g_bonded_devices[index];
         if (std::memcmp(address, bond.bd_addr, ESP_BD_ADDR_LEN) == 0 ||
             ((bond.bond_key.key_mask & ESP_BLE_ID_KEY_MASK) != 0 &&
              std::memcmp(address, bond.bond_key.pid_key.static_addr,
                          ESP_BD_ADDR_LEN) == 0)) {
-            return true;
+            matched = true;
+            break;
         }
     }
-    return false;
+    portEXIT_CRITICAL(&g_bonds_lock);
+    return matched;
 }
 
 void configure_security() {
@@ -287,12 +296,12 @@ void interpret_consumer_control(const std::uint8_t* bytes,
 
 void semantic_timer_task(void*) {
     while (true) {
-        const TickType_t now = xTaskGetTickCount();
         int direction = 0;
         std::uint32_t count = 0;
         bool rearmed_after_reversal = false;
 
         taskENTER_CRITICAL(&g_semantic_lock);
+        const TickType_t now = xTaskGetTickCount();
         if (g_dial_cancelled_until_quiet &&
             now - g_dial_last_tick >= kDialBurstQuietTime) {
             g_dial_cancelled_until_quiet = false;
@@ -575,7 +584,9 @@ void start_ble_hid_logger(BleHidActionCallback callback,
     // RPA here made the remote advertise, but every open failed with HCI 0x3e.
     ESP_LOGI(kTag, "using stable public BLE identity for bonded reconnect");
     xEventGroupSetBits(g_events, kPrivacyReady);
-    xTaskCreate(scan_task, "d100h_scan", 6144, nullptr, 3, nullptr);
-    xTaskCreate(semantic_timer_task, "d100h_semantic", 3072, nullptr, 3,
-                nullptr);
+    ESP_ERROR_CHECK(xTaskCreate(scan_task, "d100h_scan", 6144, nullptr, 3,
+                               nullptr) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);
+    ESP_ERROR_CHECK(xTaskCreate(semantic_timer_task, "d100h_semantic", 3072,
+                               nullptr, 3, nullptr) == pdPASS
+                        ? ESP_OK : ESP_ERR_NO_MEM);
 }

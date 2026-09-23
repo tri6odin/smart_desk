@@ -33,9 +33,18 @@ ESP32-S3-WROOM-1-N16R8 (16 МБ flash, 8 МБ Octal PSRAM).
 
 Production-автомат находится в `components/desk_controller`: он не зависит от
 FreeRTOS и принимает за один вызов согласованный snapshot времени, телеметрии и
-BLE-входа. `app_main.cpp` занимается только UART/BLE/NVS и отправляет результат
+BLE-входа. `production_main.cpp` связывает UART/BLE/NVS и отправляет результат
 автомата. Новые detent во время автономного STEP или стабилизации потребляются,
 но не превращаются в очередь будущих перемещений.
+
+После рефакторинга 2026-09-23 production-точка входа —
+`main/production_main.cpp`; `main/app_main.cpp` содержит только лабораторные
+режимы. CMake выбирает ровно одну точку входа. Чистые `TelemetryTracker` и
+`InputMailbox` в `components/desk_controller/desk_inputs.cpp` проверяют
+телеметрию и объединяют BLE-входы; ESP-адаптер защищает их одним lock.
+`main/preset_store.cpp` отвечает за NVS, `main/uart_transport.cpp` — за общую
+настройку UART. Подробности и границы проверки — в
+[отчёте о рефакторинге](../docs/firmware-refactor-2026-09-23.md).
 
 После остановки нет фиксированной блокировки на 1,5–3 секунды. Автомат ждёт
 500 мс тишины ввода и стабильную высоту: три одинаковых кадра для продолжения
@@ -85,11 +94,35 @@ cmake --build firmware/build-host
 ctest --test-dir firmware/build-host --output-on-failure
 ```
 
+Единая команда из корня репозитория: `python3 tools/check_firmware.py`.
+Флаг `--all-modes` после host-тестов собирает все восемь режимов через EIM
+с ESP-IDF 6.1 и проверяет выбранный режим в итоговом sdkconfig. Скрипт не
+прошивает устройство. `--sanitizers address,undefined` включает санитайзеры;
+`--sanitizers undefined` позволяет отдельно запустить UBSan.
+
 Тестируются кодек UART и сценарии production-автомата: STEP/HOLD,
 непрерывный ввод и отпускание, STOP/реверс, отсутствие очереди, SIT/STAND с
 измеренным выбегом, независимость presets от пределов, ускоренный rearm,
 программные пределы с обеих сторон, зависшая телеметрия и переполнение
 32-битного счётчика BLE.
+
+Дополнительно проверяются STOP и отказ телеметрии во всех активных состояниях,
+просроченные и одновременные события, восстановление после разрыва телеметрии,
+переполнение времени, watchdog при продолжающемся движении и 200 000
+детерминированных шагов со смешанными входами. Это имитационная проверка
+логики, а не аппаратный soak-test.
+
+Для проверки памяти и undefined behavior на host с Clang/GCC:
+
+```sh
+cmake -S firmware/tests -B firmware/build-host-sanitized -D DESK_ENABLE_SANITIZERS=ON -D CMAKE_BUILD_TYPE=Debug
+cmake --build firmware/build-host-sanitized
+ctest --test-dir firmware/build-host-sanitized --output-on-failure --timeout 30
+```
+
+На использованном Mac прогон ASan зависал даже на пустой программе; его
+результат не засчитан. Отдельный UBSan-прогон прошёл. Для полного допуска
+ASan нужно повторить на host с рабочим runtime.
 
 ## Сборка ESP-IDF
 

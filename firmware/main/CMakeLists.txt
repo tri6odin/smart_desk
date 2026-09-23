@@ -1,4 +1,8 @@
 set(main_sources "app_main.cpp")
+if(CONFIG_DESK_MODE_BLE_CONTROLLER)
+    set(main_sources "production_main.cpp" "preset_store.cpp")
+endif()
+list(APPEND main_sources "uart_transport.cpp")
 
 if(CONFIG_DESK_MODE_BLE_HID_LOGGER OR CONFIG_DESK_MODE_BLE_ONE_SHOT_TEST OR
    CONFIG_DESK_MODE_BLE_CALIBRATION OR CONFIG_DESK_MODE_BLE_CONTROLLER)
@@ -13,5 +17,5 @@ idf_component_register(
     # available, so these cannot be conditional on DESK_MODE_* here.  Keeping
     # them unconditional only exposes their headers; non-BLE modes still omit
     # ble_hid_logger.cpp and do not link live Bluetooth code.
-    PRIV_REQUIRES bt esp_hid nvs_flash
+    PRIV_REQUIRES bt esp_hid nvs_flash esp_timer
 )
