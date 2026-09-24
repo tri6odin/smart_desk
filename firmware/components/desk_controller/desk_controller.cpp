@@ -122,7 +122,23 @@ ControllerOutput DeskController::update(const ControllerInput& input) {
     // even when a higher-priority button rejects or replaces the gesture.
     const std::uint32_t pending_reports = consume_dial_reports(input);
     if (state_ != ControlState::kIdle && input.request != ControlRequest::kNone) {
-        begin_settling(input);
+        if (state_ == ControlState::kSettling) {
+            // Re-evaluate readiness before treating a new button as STOP.
+            // Otherwise the first press on the very tick that confirms the
+            // completed stop gets lost. Rejected requests are never queued.
+            const bool stopped = !input.stop_requested && valid_height(input) &&
+                input.telemetry_settled &&
+                input.telemetry_stable_frames >= config_.full_settle_frames &&
+                elapsed(input.now_ms, settle_start_ms_, config_.rearm_quiet_ms) &&
+                elapsed(input.now_ms, input.last_dial_ms, config_.rearm_quiet_ms);
+            if (stopped) {
+                become_idle();
+                return update_idle(input, 0);
+            }
+            // A rejected button must not extend the settling watchdog.
+        } else {
+            begin_settling(input);
+        }
         return output(Command::kIdle, TransitionReason::kButtonDuringMotion);
     }
     switch (state_) {

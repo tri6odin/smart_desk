@@ -680,7 +680,90 @@ void test_generated_input_sequences_preserve_safety_invariants() {
     }
 }
 
+void test_preset_starts_on_first_press_after_boundary_has_settled() {
+    for (const bool lower : {true, false}) {
+        DeskController controller;
+        auto input = stable_input(0, lower ? 750 : 1150);
+        add_dial(input, 3, lower ? -1 : +1, 0);
+        controller.update(input);
+
+        input.now_ms = 100;
+        input.height_tenths_cm = lower ? 720 : 1175;
+        input.telemetry_settled = false;
+        input.telemetry_stable_frames = 0;
+        CHECK(controller.update(input).state == ControlState::kSettling);
+
+        // The button arrives with the snapshot that first proves the stop.
+        // It must not be discarded just because the previous state is SETTLING.
+        input.now_ms = 700;
+        input.height_tenths_cm = lower ? 700 : 1200;
+        input.telemetry_settled = true;
+        input.telemetry_stable_frames = 5;
+        input.request = lower ? ControlRequest::kGoSit : ControlRequest::kGoStand;
+        const auto result = controller.update(input);
+        CHECK(result.state == ControlState::kPresetHold);
+        CHECK(result.command == (lower ? Command::kUpHold : Command::kDownHold));
+    }
+}
+
+void test_preset_during_coast_is_discarded_without_delayed_motion() {
+    for (int fault = 0; fault < 6; ++fault) {
+        DeskController controller;
+        auto input = stable_input(0, 750);
+        add_dial(input, 3, -1, 0);
+        controller.update(input);
+        input.now_ms = 100;
+        input.height_tenths_cm = 720;
+        controller.update(input);
+
+        input.now_ms = 700;
+        input.height_tenths_cm = 700;
+        input.request = ControlRequest::kGoSit;
+        if (fault == 0) input.telemetry_fresh = false;
+        if (fault == 1) input.telemetry_settled = false;
+        if (fault == 2) input.telemetry_stable_frames = 3;
+        if (fault == 3) input.stop_requested = true;
+        if (fault == 4) input.last_dial_ms = 600;
+        if (fault == 5) input.now_ms = 200;
+        const auto rejected = controller.update(input);
+        CHECK(rejected.command == Command::kIdle);
+        CHECK(rejected.state == ControlState::kSettling);
+
+        input = stable_input(1300, 700);
+        input.dial_sequence = 3;
+        input.dial_direction = -1;
+        input.last_dial_ms = 600;
+        CHECK(controller.update(input).command == Command::kIdle);
+        input.now_ms = 1400;
+        CHECK(controller.update(input).state == ControlState::kIdle);
+        input.request = ControlRequest::kGoSit;
+        CHECK(controller.update(input).command == Command::kUpHold);
+    }
+}
+
+void test_repeated_rejected_presets_do_not_extend_settling_watchdog() {
+    DeskController controller;
+    auto input = stable_input(0, 750);
+    add_dial(input, 3, -1, 0);
+    controller.update(input);
+    input.now_ms = 100;
+    input.height_tenths_cm = 720;
+    controller.update(input);
+    input.telemetry_fresh = false;
+    input.request = ControlRequest::kGoSit;
+    for (input.now_ms = 200; input.now_ms < 7100; input.now_ms += 100) {
+        CHECK(controller.update(input).command == Command::kIdle);
+    }
+    input.request = ControlRequest::kNone;
+    const auto result = controller.update(input);
+    CHECK(result.state == ControlState::kIdle);
+    CHECK(result.reason == TransitionReason::kSettleWatchdog);
+}
+
 int main() {
+    test_preset_starts_on_first_press_after_boundary_has_settled();
+    test_preset_during_coast_is_discarded_without_delayed_motion();
+    test_repeated_rejected_presets_do_not_extend_settling_watchdog();
     test_stop_and_telemetry_failure_in_every_active_state();
     test_clock_wrap_preserves_classification_and_lease();
     test_absolute_hold_deadlines_with_continued_progress();

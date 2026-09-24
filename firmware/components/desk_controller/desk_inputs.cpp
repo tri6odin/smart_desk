@@ -57,7 +57,9 @@ void InputMailbox::button(ButtonRequest request) {
     if (request == ButtonRequest::kNone) {
         return;
     }
-    if (active_direction_ != 0) {
+    // The retained direction in SETTLING describes the previous motion, not
+    // whether the desk is still moving. Let the FSM check current telemetry.
+    if (state_ != ControlState::kIdle && state_ != ControlState::kSettling) {
         stop();
     } else if (!pending_.stop_requested) {
         pending_.button = request;

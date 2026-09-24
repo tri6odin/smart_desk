@@ -95,7 +95,7 @@ void test_reversal_and_buttons_stop_active_motion() {
     for (auto request : {ButtonRequest::kGoSit, ButtonRequest::kGoStand,
                          ButtonRequest::kSaveSit, ButtonRequest::kSaveStand}) {
         InputMailbox inputs;
-        inputs.set_active_direction(1);
+        inputs.set_controller_state(ControlState::kManualHold, 1);
         inputs.button(request);
         CHECK(inputs.consume().stop_requested);
         inputs.dial(-1, 50);
@@ -137,6 +137,35 @@ void test_disconnect_cancels_inputs_end_to_end() {
     input.now_ms = 100;
     CHECK(controller.update(input).state == ControlState::kIdle);
 }
+
+void test_settled_preset_survives_ble_mailbox_and_fsm() {
+    InputMailbox inputs;
+    DeskController controller;
+    ControllerInput input;
+    input.telemetry_fresh = true;
+    input.telemetry_settled = true;
+    input.telemetry_stable_frames = 5;
+    input.height_tenths_cm = 750;
+    input.dial_direction = -1;
+    input.dial_sequence = 3;
+    controller.update(input);
+    input.now_ms = 100;
+    input.height_tenths_cm = 720;
+    CHECK(controller.update(input).state == ControlState::kSettling);
+    inputs.set_controller_state(controller.state(), controller.direction());
+
+    inputs.button(ButtonRequest::kGoSit);
+    const auto snapshot = inputs.consume();
+    CHECK(!snapshot.stop_requested);
+    CHECK(snapshot.button == ButtonRequest::kGoSit);
+    input.now_ms = 700;
+    input.height_tenths_cm = 700;
+    input.stop_requested = snapshot.stop_requested;
+    input.request = snapshot.button == ButtonRequest::kGoSit
+                        ? ControlRequest::kGoSit : ControlRequest::kNone;
+    CHECK(controller.update(input).command == Command::kUpHold);
+    CHECK(inputs.consume().button == ButtonRequest::kNone);
+}
 }  // namespace
 
 int main() {
@@ -147,5 +176,6 @@ int main() {
     test_reversal_and_buttons_stop_active_motion();
     test_button_slot_replaces_without_queue();
     test_disconnect_cancels_inputs_end_to_end();
+    test_settled_preset_survives_ble_mailbox_and_fsm();
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;
 }

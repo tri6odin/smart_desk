@@ -130,8 +130,10 @@ void panel_writer_task(void*) {
         const auto raw_request = dial.button;
 
         smart_desk::ButtonRequest request = raw_request;
+        const bool save_request = request == smart_desk::ButtonRequest::kSaveSit ||
+                                  request == smart_desk::ButtonRequest::kSaveStand;
         if (controller.state() != smart_desk::ControlState::kIdle &&
-            request != smart_desk::ButtonRequest::kNone) {
+            save_request) {
             ESP_LOGW("desk.control", "button during motion -> STOP; action not queued");
             stop_requested = true;
             request = smart_desk::ButtonRequest::kNone;
@@ -201,7 +203,7 @@ void panel_writer_task(void*) {
         const smart_desk::ControllerOutput controller_output =
             controller.update(controller_input);
         portENTER_CRITICAL(&g_inputs_mux);
-        g_inputs.set_active_direction(controller.direction());
+        g_inputs.set_controller_state(controller.state(), controller.direction());
         portEXIT_CRITICAL(&g_inputs_mux);
 
         if (controller_output.reason != smart_desk::TransitionReason::kNone ||

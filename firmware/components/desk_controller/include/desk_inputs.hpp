@@ -46,10 +46,14 @@ class InputMailbox {
     void button(ButtonRequest request);
     void stop();
     InputSnapshot consume();
-    void set_active_direction(int direction) { active_direction_ = direction; }
+    void set_controller_state(ControlState state, int direction) {
+        state_ = state;
+        active_direction_ = direction;
+    }
 
    private:
     InputSnapshot pending_;
+    ControlState state_ = ControlState::kIdle;
     int active_direction_ = 0;
 };
 
