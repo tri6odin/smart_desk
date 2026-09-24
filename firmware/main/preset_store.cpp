@@ -18,9 +18,11 @@ DeskPresets load_presets(const ControllerConfig& config) {
             presets = stored;
         }
     }
-    ESP_LOGW("desk.control", "SIT=%u.%u cm STAND=%u.%u cm limits=70.0..120.0",
+    ESP_LOGW("desk.control", "SIT=%u.%u cm STAND=%u.%u cm limits=%u.%u..%u.%u",
              presets.sit / 10, presets.sit % 10, presets.stand / 10,
-             presets.stand % 10);
+             presets.stand % 10,
+             config.soft_min_tenths_cm / 10, config.soft_min_tenths_cm % 10,
+             config.soft_max_tenths_cm / 10, config.soft_max_tenths_cm % 10);
     return presets;
 }
 

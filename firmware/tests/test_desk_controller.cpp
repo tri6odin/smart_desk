@@ -398,17 +398,42 @@ void test_opposite_gesture_waits_for_full_stop_but_is_not_queued() {
 }
 
 void test_soft_limits_block_only_outward_direction() {
-    DeskController controller;
-    auto input = stable_input(0, 1200);
-    add_dial(input, 1, +1, 0);
-    auto result = controller.update(input);
-    CHECK(result.state == ControlState::kIdle);
-    CHECK(result.reason == TransitionReason::kSoftLimit);
+    for (const int direction : {-1, +1}) {
+        DeskController controller;
+        auto input = stable_input(0, direction > 0 ? 1180 : 720);
+        add_dial(input, 1, direction, 0);
+        auto result = controller.update(input);
+        CHECK(result.state == ControlState::kIdle);
+        CHECK(result.reason == TransitionReason::kSoftLimit);
 
-    input.now_ms = 100;
-    add_dial(input, 2, -1, 100);
-    result = controller.update(input);
-    CHECK(result.state == ControlState::kDialClassify);
+        input.now_ms = 100;
+        add_dial(input, 2, -direction, 100);
+        result = controller.update(input);
+        CHECK(result.state == ControlState::kDialClassify);
+    }
+}
+
+void test_manual_hold_brakes_before_working_limits() {
+    for (const int direction : {-1, +1}) {
+        DeskController controller;
+        auto input = stable_input(0, direction > 0 ? 1100 : 800);
+        add_dial(input, 3, direction, 0);
+        const auto hold = direction > 0 ? Command::kUpHold : Command::kDownHold;
+        CHECK(controller.update(input).command == hold);
+
+        input.now_ms = 100;
+        input.telemetry_settled = false;
+        input.telemetry_stable_frames = 0;
+        input.height_tenths_cm = direction > 0 ? 1154 : 741;
+        CHECK(controller.update(input).command == hold);
+
+        input.now_ms = 200;
+        input.height_tenths_cm = direction > 0 ? 1155 : 740;
+        const auto result = controller.update(input);
+        CHECK(result.command == Command::kIdle);
+        CHECK(result.state == ControlState::kSettling);
+        CHECK(result.reason == TransitionReason::kBoundaryReached);
+    }
 }
 
 void test_soft_limits_recover_when_already_outside_configured_range() {
@@ -540,11 +565,11 @@ void test_preset_does_not_pulse_hold_inside_braking_zone() {
 
 void test_classification_rechecks_limits_before_step() {
     DeskController controller;
-    auto input = stable_input(0, 1190);
+    auto input = stable_input(0, 1170);
     add_dial(input, 1, +1, 0);
-    controller.update(input);
+    CHECK(controller.update(input).state == ControlState::kDialClassify);
     input.now_ms = 300;
-    input.height_tenths_cm = 1195;
+    input.height_tenths_cm = 1175;
     CHECK(controller.update(input).command == Command::kIdle);
 }
 
@@ -688,7 +713,7 @@ void test_preset_starts_on_first_press_after_boundary_has_settled() {
         controller.update(input);
 
         input.now_ms = 100;
-        input.height_tenths_cm = lower ? 720 : 1175;
+        input.height_tenths_cm = lower ? 740 : 1155;
         input.telemetry_settled = false;
         input.telemetry_stable_frames = 0;
         CHECK(controller.update(input).state == ControlState::kSettling);
@@ -696,7 +721,7 @@ void test_preset_starts_on_first_press_after_boundary_has_settled() {
         // The button arrives with the snapshot that first proves the stop.
         // It must not be discarded just because the previous state is SETTLING.
         input.now_ms = 700;
-        input.height_tenths_cm = lower ? 700 : 1200;
+        input.height_tenths_cm = lower ? 720 : 1180;
         input.telemetry_settled = true;
         input.telemetry_stable_frames = 5;
         input.request = lower ? ControlRequest::kGoSit : ControlRequest::kGoStand;
@@ -788,6 +813,7 @@ int main() {
     test_same_direction_gesture_rearms_after_quiet_and_three_frames();
     test_opposite_gesture_waits_for_full_stop_but_is_not_queued();
     test_soft_limits_block_only_outward_direction();
+    test_manual_hold_brakes_before_working_limits();
     test_soft_limits_recover_when_already_outside_configured_range();
     test_stop_during_manual_hold_is_immediate_and_not_queued();
     test_dial_sequence_wrap_is_counted_modulo_32_bits();

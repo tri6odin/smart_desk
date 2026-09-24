@@ -52,8 +52,9 @@ enum class TransitionReason {
 struct ControllerConfig {
     std::uint16_t physical_min_tenths_cm = 700;
     std::uint16_t physical_max_tenths_cm = 1200;
-    std::uint16_t soft_min_tenths_cm = 700;
-    std::uint16_t soft_max_tenths_cm = 1200;
+    // Final resting targets; HOLD releases earlier to account for coast.
+    std::uint16_t soft_min_tenths_cm = 720;
+    std::uint16_t soft_max_tenths_cm = 1180;
     std::uint16_t sit_target_tenths_cm = 800;
     std::uint16_t stand_target_tenths_cm = 1150;
     std::uint16_t up_coast_tenths_cm = 25;
