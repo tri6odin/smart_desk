@@ -55,8 +55,7 @@ struct RecoveryOutput {
 // needing calibration cannot be trusted to report its position correctly.
 class DeskRecoveryController {
    public:
-    explicit DeskRecoveryController(RecoveryConfig config = {},
-                                    bool initially_locked = false);
+    explicit DeskRecoveryController(RecoveryConfig config = {});
 
     RecoveryOutput update(const RecoveryInput& input);
     RecoveryState state() const { return state_; }
@@ -74,9 +73,9 @@ class DeskRecoveryController {
     bool fault_latched_ = false;
     std::uint32_t stage_started_ms_ = 0;
     std::uint32_t activity_baseline_ = 0;
-    std::uint32_t reset_baseline_ = 0;
     std::uint32_t height_baseline_ = 0;
     std::uint32_t seen_unknown_sequence_ = 0;
+    std::uint32_t seen_reset_sequence_ = 0;
     std::uint32_t cancelled_activity_sequence_ = 0;
     bool suppress_cancel_action_ = false;
 };

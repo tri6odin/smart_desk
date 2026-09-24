@@ -152,6 +152,7 @@ void test_recovery_ignores_height_until_rst_then_unlocks() {
     input.calibration_requested = false;
     input.now_ms = 20000;
     input.height_frame_sequence = 100;
+    input.unknown_frame_sequence = 3;
     input.telemetry_fresh = false;
     input.telemetry_stable_frames = 0;
     result = recovery.update(input);
@@ -230,7 +231,7 @@ void test_calibration_timeout_locks_until_new_rst_attempt() {
     CHECK(result.reason == RecoveryReason::kCalibrationTimeout);
 }
 
-void test_unknown_frame_stops_active_calibration_immediately() {
+void test_unknown_frame_does_not_interrupt_active_calibration() {
     DeskRecoveryController recovery;
     RecoveryInput input;
     input.calibration_requested = true;
@@ -242,42 +243,67 @@ void test_unknown_frame_stops_active_calibration_immediately() {
     input.now_ms = 100;
     input.unknown_frame_sequence = 1;
     result = recovery.update(input);
-    CHECK(result.state == RecoveryState::kLocked);
-    CHECK(result.command == Command::kIdle);
+    CHECK(result.state == RecoveryState::kCalibrating);
+    CHECK(result.command == Command::kDownHold);
     CHECK(result.override_motion);
-    CHECK(result.reset_motion_controller);
-    CHECK(result.reason == RecoveryReason::kUnknownControllerFrame);
 
-    // Even a later RST cannot unlock a stopped attempt. The operator must
-    // explicitly start calibration again with a new 10-second hold.
+    // RST completes the same recovery attempt despite the preceding error.
     input.now_ms = 200;
     input.reset_frame_sequence = 1;
     result = recovery.update(input);
-    CHECK(result.state == RecoveryState::kLocked);
+    CHECK(result.state == RecoveryState::kAwaitingTelemetry);
     CHECK(result.command == Command::kIdle);
+
+    DeskRecoveryController cancelled;
+    RecoveryInput cancelled_input;
+    cancelled_input.calibration_requested = true;
+    cancelled.update(cancelled_input);
+    cancelled_input.calibration_requested = false;
+    cancelled_input.unknown_frame_sequence = 1;
+    cancelled_input.now_ms = 100;
+    CHECK(cancelled.update(cancelled_input).state ==
+          RecoveryState::kCalibrating);
+    cancelled_input.user_activity_sequence = 1;
+    cancelled_input.now_ms = 200;
+    result = cancelled.update(cancelled_input);
+    CHECK(result.state == RecoveryState::kLocked);
+    CHECK(result.reason == RecoveryReason::kCalibrationCancelled);
 }
 
-void test_unknown_frame_beats_simultaneous_calibration_request() {
+void test_calibration_request_is_allowed_with_simultaneous_error_frame() {
     DeskRecoveryController recovery;
     RecoveryInput input;
+    input.user_activity_sequence = 7;
     input.unknown_frame_sequence = 1;
     input.calibration_requested = true;
     const auto result = recovery.update(input);
-    CHECK(result.state == RecoveryState::kLocked);
-    CHECK(result.command == Command::kIdle);
-    CHECK(result.reason == RecoveryReason::kUnknownControllerFrame);
-}
-
-void test_persisted_recovery_lock_starts_blocked() {
-    DeskRecoveryController recovery({}, true);
-    RecoveryInput input;
-    auto result = recovery.update(input);
-    CHECK(result.state == RecoveryState::kLocked);
-    CHECK(result.override_motion);
-    input.calibration_requested = true;
-    result = recovery.update(input);
     CHECK(result.state == RecoveryState::kCalibrating);
     CHECK(result.command == Command::kDownHold);
+    CHECK(result.reason == RecoveryReason::kCalibrationStarted);
+}
+
+void test_locked_state_accepts_rst_and_reboot_starts_clean() {
+    DeskRecoveryController recovery;
+    RecoveryInput input;
+    input.user_activity_sequence = 7;
+    input.unknown_frame_sequence = 1;
+    auto result = recovery.update(input);
+    CHECK(result.state == RecoveryState::kLocked);
+
+    input.now_ms = 100;
+    input.reset_frame_sequence = 1;
+    result = recovery.update(input);
+    CHECK(result.state == RecoveryState::kAwaitingTelemetry);
+
+    input.now_ms = 200;
+    input.height_frame_sequence = 1;
+    input.telemetry_fresh = true;
+    input.telemetry_stable_frames = 3;
+    result = recovery.update(input);
+    CHECK(result.state == RecoveryState::kReady);
+
+    DeskRecoveryController after_reboot;
+    CHECK(after_reboot.update({}).state == RecoveryState::kReady);
 }
 
 void test_stop_dominates_button_in_both_orders() {
@@ -396,9 +422,9 @@ int main() {
     test_recovery_ignores_height_until_rst_then_unlocks();
     test_any_new_user_activity_cancels_calibration();
     test_calibration_timeout_locks_until_new_rst_attempt();
-    test_unknown_frame_stops_active_calibration_immediately();
-    test_unknown_frame_beats_simultaneous_calibration_request();
-    test_persisted_recovery_lock_starts_blocked();
+    test_unknown_frame_does_not_interrupt_active_calibration();
+    test_calibration_request_is_allowed_with_simultaneous_error_frame();
+    test_locked_state_accepts_rst_and_reboot_starts_clean();
     test_stop_dominates_button_in_both_orders();
     test_reversal_and_buttons_stop_active_motion();
     test_button_slot_replaces_without_queue();

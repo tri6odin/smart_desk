@@ -126,15 +126,7 @@ void panel_writer_task(void*) {
     controller_config.sit_target_tenths_cm = presets.sit;
     controller_config.stand_target_tenths_cm = presets.stand;
     smart_desk::DeskController controller(controller_config);
-    const bool persisted_recovery_lock = smart_desk::load_recovery_lock();
-    smart_desk::DeskRecoveryController recovery({}, persisted_recovery_lock);
-    bool recovery_lock_persisted = persisted_recovery_lock;
-    bool recovery_lock_save_attempted = false;
-    std::uint32_t recovery_lock_last_attempt_ms = 0;
-    if (persisted_recovery_lock) {
-        ESP_LOGE("desk.recovery",
-                 "persistent motion lock active; hold dial 10 s to calibrate");
-    }
+    smart_desk::DeskRecoveryController recovery;
 
     // Ignore any BLE reports received while this task was being created.
     smart_desk::ControllerInput initial_input;
@@ -174,8 +166,8 @@ void panel_writer_task(void*) {
             controller.update(sync_input);
             logged_state = controller.state();
         }
-        // Send the safety override before logging or NVS writes. A persistent
-        // lock must never delay the first IDLE after an unexpected frame.
+        // Send the safety override before logging or any preset NVS write.
+        // Recovery must never delay the first IDLE after an unexpected frame.
         if (recovery_output.override_motion ||
             recovery_output.suppress_normal_input) {
             portENTER_CRITICAL(&g_inputs_mux);
@@ -188,28 +180,6 @@ void panel_writer_task(void*) {
                 g_inputs.stop();
                 g_inputs.user_activity();
                 portEXIT_CRITICAL(&g_inputs_mux);
-            }
-        }
-
-        if (recovery_output.state == smart_desk::RecoveryState::kLocked &&
-            !recovery_lock_persisted &&
-            (!recovery_lock_save_attempted ||
-             static_cast<std::uint32_t>(
-                 inputs.now_ms - recovery_lock_last_attempt_ms) >= 1000)) {
-            recovery_lock_save_attempted = true;
-            recovery_lock_last_attempt_ms = inputs.now_ms;
-            if (!smart_desk::save_recovery_lock(true)) {
-                ESP_LOGE("desk.recovery", "could not persist motion lock");
-            } else {
-                recovery_lock_persisted = true;
-            }
-        } else if (recovery_output.reason ==
-                   smart_desk::RecoveryReason::kCalibrationComplete) {
-            if (recovery_lock_persisted &&
-                !smart_desk::save_recovery_lock(false)) {
-                ESP_LOGE("desk.recovery", "could not clear persistent motion lock");
-            } else {
-                recovery_lock_persisted = false;
             }
         }
 

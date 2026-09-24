@@ -41,41 +41,4 @@ bool save_presets(const DeskPresets& presets, const ControllerConfig& config) {
     return ok;
 }
 
-bool load_recovery_lock() {
-    nvs_handle_t handle = 0;
-    std::uint8_t locked = 0;
-    const esp_err_t open_result = nvs_open("desk", NVS_READONLY, &handle);
-    if (open_result == ESP_ERR_NVS_NOT_FOUND) {
-        return false;
-    }
-    if (open_result != ESP_OK) {
-        ESP_LOGE("desk.recovery", "could not read motion lock: %s",
-                 esp_err_to_name(open_result));
-        return true;
-    }
-    const esp_err_t result = nvs_get_u8(handle, "recovery_lock", &locked);
-    nvs_close(handle);
-    if (result == ESP_ERR_NVS_NOT_FOUND) {
-        return false;
-    }
-    if (result != ESP_OK) {
-        ESP_LOGE("desk.recovery", "could not read motion lock value: %s",
-                 esp_err_to_name(result));
-        return true;
-    }
-    return locked != 0;
-}
-
-bool save_recovery_lock(bool locked) {
-    nvs_handle_t handle = 0;
-    if (nvs_open("desk", NVS_READWRITE, &handle) != ESP_OK) {
-        return false;
-    }
-    const bool ok =
-        nvs_set_u8(handle, "recovery_lock", locked ? 1 : 0) == ESP_OK &&
-        nvs_commit(handle) == ESP_OK;
-    nvs_close(handle);
-    return ok;
-}
-
 }  // namespace smart_desk

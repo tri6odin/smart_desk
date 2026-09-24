@@ -1,15 +1,9 @@
 #include "desk_recovery.hpp"
 
-#include <utility>
-
 namespace smart_desk {
 
-DeskRecoveryController::DeskRecoveryController(RecoveryConfig config,
-                                               bool initially_locked)
-    : config_(std::move(config)),
-      state_(initially_locked ? RecoveryState::kLocked
-                              : RecoveryState::kReady),
-      fault_latched_(initially_locked) {}
+DeskRecoveryController::DeskRecoveryController(RecoveryConfig config)
+    : config_(config) {}
 
 bool DeskRecoveryController::elapsed(std::uint32_t now, std::uint32_t since,
                                      std::uint32_t duration) const {
@@ -29,16 +23,12 @@ RecoveryOutput DeskRecoveryController::update(const RecoveryInput& input) {
 
     const bool unknown_frame =
         input.unknown_frame_sequence != seen_unknown_sequence_;
+    const bool reset_frame =
+        input.reset_frame_sequence != seen_reset_sequence_;
     seen_unknown_sequence_ = input.unknown_frame_sequence;
+    seen_reset_sequence_ = input.reset_frame_sequence;
     if (unknown_frame) {
-        const bool newly_latched = !fault_latched_;
-        const bool state_changed = state_ != RecoveryState::kLocked;
         fault_latched_ = true;
-        if (newly_latched) {
-            reason = RecoveryReason::kUnknownControllerFrame;
-        }
-        state_ = RecoveryState::kLocked;
-        return output(Command::kIdle, reason, state_changed);
     }
 
     if (input.calibration_requested) {
@@ -46,7 +36,6 @@ RecoveryOutput DeskRecoveryController::update(const RecoveryInput& input) {
         state_ = RecoveryState::kCalibrating;
         stage_started_ms_ = input.now_ms;
         activity_baseline_ = input.user_activity_sequence;
-        reset_baseline_ = input.reset_frame_sequence;
         reason = RecoveryReason::kCalibrationStarted;
         return output(Command::kDownHold, reason, true);
     }
@@ -63,12 +52,15 @@ RecoveryOutput DeskRecoveryController::update(const RecoveryInput& input) {
     }
 
     if (state_ == RecoveryState::kCalibrating) {
-        if (input.reset_frame_sequence != reset_baseline_) {
+        if (reset_frame) {
             state_ = RecoveryState::kAwaitingTelemetry;
             stage_started_ms_ = input.now_ms;
             height_baseline_ = input.height_frame_sequence;
             return output(Command::kIdle, RecoveryReason::kResetAcknowledged);
         }
+        // Error/status frames are expected while recovering a controller
+        // fault. They keep the fault latched but must not interrupt DOWN;
+        // only RST, user cancellation or timeout ends this stage.
         if (elapsed(input.now_ms, stage_started_ms_,
                     config_.calibration_timeout_ms)) {
             fault_latched_ = true;
@@ -80,6 +72,11 @@ RecoveryOutput DeskRecoveryController::update(const RecoveryInput& input) {
     }
 
     if (state_ == RecoveryState::kAwaitingTelemetry) {
+        if (unknown_frame) {
+            state_ = RecoveryState::kLocked;
+            return output(Command::kIdle,
+                          RecoveryReason::kUnknownControllerFrame, true);
+        }
         const bool new_height =
             input.height_frame_sequence != height_baseline_;
         if (new_height && input.telemetry_fresh &&
@@ -101,7 +98,21 @@ RecoveryOutput DeskRecoveryController::update(const RecoveryInput& input) {
     }
 
     if (state_ == RecoveryState::kLocked) {
+        if (reset_frame) {
+            suppress_cancel_action_ = false;
+            state_ = RecoveryState::kAwaitingTelemetry;
+            stage_started_ms_ = input.now_ms;
+            activity_baseline_ = input.user_activity_sequence;
+            height_baseline_ = input.height_frame_sequence;
+            return output(Command::kIdle, RecoveryReason::kResetAcknowledged);
+        }
         return output(Command::kIdle, reason);
+    }
+
+    if (unknown_frame) {
+        state_ = RecoveryState::kLocked;
+        return output(Command::kIdle,
+                      RecoveryReason::kUnknownControllerFrame, true);
     }
     auto result = output(Command::kIdle, reason);
     if (suppress_cancel_action_) {
