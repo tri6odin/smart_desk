@@ -5,6 +5,7 @@
 #include <cstdio>
 #include <cstring>
 
+#include "desk_inputs.hpp"
 #include "esp_bt.h"
 #include "esp_bt_main.h"
 #include "esp_gap_ble_api.h"
@@ -33,6 +34,8 @@ constexpr std::size_t kMaxBondedDevices = 8;
 // silence before committing a dial gesture.
 constexpr TickType_t kDialBurstQuietTime = pdMS_TO_TICKS(400);
 constexpr TickType_t kLongPressThreshold = pdMS_TO_TICKS(4500);
+constexpr TickType_t kForgetBondHoldTime = pdMS_TO_TICKS(5000);
+constexpr std::uint16_t kPlayPauseUsage = 0x00CD;
 
 EventGroupHandle_t g_events = nullptr;
 std::array<std::uint8_t, 6> g_candidate_address{};
@@ -50,12 +53,20 @@ bool g_sit_pressed = false;
 bool g_stand_pressed = false;
 TickType_t g_sit_press_tick = 0;
 TickType_t g_stand_press_tick = 0;
+smart_desk::LongPressDetector g_forget_bond_button(
+    static_cast<std::uint32_t>(kForgetBondHoldTime));
 int g_dial_direction = 0;
 std::uint32_t g_dial_event_count = 0;
 TickType_t g_dial_last_tick = 0;
 bool g_dial_cancelled_until_quiet = false;
 BleHidActionCallback g_action_callback = nullptr;
 void* g_action_callback_context = nullptr;
+
+portMUX_TYPE g_connection_lock = portMUX_INITIALIZER_UNLOCKED;
+std::array<std::uint8_t, ESP_BD_ADDR_LEN> g_connected_address{};
+bool g_connected_address_valid = false;
+std::array<std::uint8_t, ESP_BD_ADDR_LEN> g_forget_bond_address{};
+bool g_forget_bond_requested = false;
 
 void publish_action(BleHidActionType type, int value = 0) {
     if (g_action_callback != nullptr) {
@@ -70,6 +81,7 @@ void reset_semantic_state() {
     g_stand_pressed = false;
     g_sit_press_tick = 0;
     g_stand_press_tick = 0;
+    g_forget_bond_button.reset();
     g_dial_direction = 0;
     g_dial_event_count = 0;
     g_dial_last_tick = 0;
@@ -91,6 +103,50 @@ void format_address(const std::uint8_t* address, char* output,
     std::snprintf(output, output_size, "%02X:%02X:%02X:%02X:%02X:%02X",
                   address[0], address[1], address[2], address[3], address[4],
                   address[5]);
+}
+
+void queue_forget_current_bond() {
+    bool queued = false;
+    portENTER_CRITICAL(&g_connection_lock);
+    if (g_connected_address_valid && !g_forget_bond_requested) {
+        g_forget_bond_address = g_connected_address;
+        g_forget_bond_requested = true;
+        queued = true;
+    }
+    portEXIT_CRITICAL(&g_connection_lock);
+
+    if (queued) {
+        ESP_LOGW(kTag, "ACTION STOP; forgetting current D100H bond");
+        publish_action(BleHidActionType::kStop);
+    } else {
+        ESP_LOGW(kTag, "forget bond ignored: no connected D100H");
+    }
+}
+
+void process_forget_bond_request() {
+    std::array<std::uint8_t, ESP_BD_ADDR_LEN> address{};
+    bool requested = false;
+    portENTER_CRITICAL(&g_connection_lock);
+    if (g_forget_bond_requested) {
+        address = g_forget_bond_address;
+        g_forget_bond_requested = false;
+        requested = true;
+    }
+    portEXIT_CRITICAL(&g_connection_lock);
+    if (!requested) {
+        return;
+    }
+
+    char address_text[18] = {};
+    format_address(address.data(), address_text, sizeof(address_text));
+    const esp_err_t result = esp_ble_remove_bond_device(address.data());
+    if (result == ESP_OK) {
+        ESP_LOGW(kTag, "removing bond %s; scan resumes after disconnect",
+                 address_text);
+    } else {
+        ESP_LOGE(kTag, "could not remove bond %s: %s", address_text,
+                 esp_err_to_name(result));
+    }
 }
 
 void refresh_bonded_devices() {
@@ -264,6 +320,13 @@ void interpret_consumer_control(const std::uint8_t* bytes,
         ESP_LOGI(kTag, "STAND pressed");
         return;
     }
+    if (usage == kPlayPauseUsage) {
+        taskENTER_CRITICAL(&g_semantic_lock);
+        g_forget_bond_button.press(static_cast<std::uint32_t>(now));
+        taskEXIT_CRITICAL(&g_semantic_lock);
+        ESP_LOGI(kTag, "PLAY/PAUSE pressed; hold 5 s to forget BLE bond");
+        return;
+    }
 
     if (usage != 0) {
         return;
@@ -273,6 +336,7 @@ void interpret_consumer_control(const std::uint8_t* bytes,
     bool release_stand = false;
     TickType_t sit_pressed_at = 0;
     TickType_t stand_pressed_at = 0;
+    bool forget_bond = false;
     taskENTER_CRITICAL(&g_semantic_lock);
     if (g_sit_pressed) {
         release_sit = true;
@@ -284,6 +348,8 @@ void interpret_consumer_control(const std::uint8_t* bytes,
         stand_pressed_at = g_stand_press_tick;
         g_stand_pressed = false;
     }
+    forget_bond =
+        g_forget_bond_button.release(static_cast<std::uint32_t>(now));
     taskEXIT_CRITICAL(&g_semantic_lock);
 
     if (release_sit) {
@@ -292,6 +358,9 @@ void interpret_consumer_control(const std::uint8_t* bytes,
     if (release_stand) {
         log_button_release("STAND", stand_pressed_at, now);
     }
+    if (forget_bond) {
+        queue_forget_current_bond();
+    }
 }
 
 void semantic_timer_task(void*) {
@@ -299,9 +368,12 @@ void semantic_timer_task(void*) {
         int direction = 0;
         std::uint32_t count = 0;
         bool rearmed_after_reversal = false;
+        bool forget_bond = false;
 
         taskENTER_CRITICAL(&g_semantic_lock);
         const TickType_t now = xTaskGetTickCount();
+        forget_bond =
+            g_forget_bond_button.poll(static_cast<std::uint32_t>(now));
         if (g_dial_cancelled_until_quiet &&
             now - g_dial_last_tick >= kDialBurstQuietTime) {
             g_dial_cancelled_until_quiet = false;
@@ -314,6 +386,11 @@ void semantic_timer_task(void*) {
             g_dial_event_count = 0;
         }
         taskEXIT_CRITICAL(&g_semantic_lock);
+
+        if (forget_bond) {
+            queue_forget_current_bond();
+        }
+        process_forget_bond_request();
 
         if (rearmed_after_reversal) {
             ESP_LOGI(kTag,
@@ -345,6 +422,11 @@ void hid_event(void*, esp_event_base_t, std::int32_t event_id,
                 char address_text[18] = {};
                 if (address != nullptr) {
                     format_address(address, address_text, sizeof(address_text));
+                    portENTER_CRITICAL(&g_connection_lock);
+                    std::memcpy(g_connected_address.data(), address,
+                                g_connected_address.size());
+                    g_connected_address_valid = true;
+                    portEXIT_CRITICAL(&g_connection_lock);
                 }
                 ESP_LOGW(kTag, "CONNECTED %s name='%s'", address_text,
                          esp_hidh_dev_name_get(data->open.dev));
@@ -472,6 +554,15 @@ void gap_event(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* data) {
                 ESP_LOGE(kTag, "pairing failed, reason=0x%02X",
                          data->ble_security.auth_cmpl.fail_reason);
             }
+            break;
+        case ESP_GAP_BLE_REMOVE_BOND_DEV_COMPLETE_EVT:
+            if (data->remove_bond_dev_cmpl.status == ESP_BT_STATUS_SUCCESS) {
+                ESP_LOGW(kTag, "BLE bond removed; searching for D100H");
+            } else {
+                ESP_LOGE(kTag, "BLE bond removal failed, status=%d",
+                         data->remove_bond_dev_cmpl.status);
+            }
+            refresh_bonded_devices();
             break;
         default:
             break;

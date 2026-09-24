@@ -73,6 +73,24 @@ void test_telemetry_across_clock_wrap() {
     CHECK(!tracker.snapshot(301).fresh);
 }
 
+void test_long_press_detector_fires_once_and_handles_wrap() {
+    LongPressDetector detector(5000);
+    detector.press(100);
+    CHECK(!detector.poll(5099));
+    CHECK(detector.poll(5100));
+    CHECK(!detector.poll(6000));
+    CHECK(!detector.release(7000));
+
+    detector.press(8000);
+    CHECK(!detector.release(9000));
+
+    detector.press(UINT32_MAX - 999);
+    CHECK(!detector.poll(3999));
+    CHECK(detector.poll(4000));
+    detector.reset();
+    CHECK(!detector.poll(10000));
+}
+
 void test_stop_dominates_button_in_both_orders() {
     for (bool stop_first : {false, true}) {
         InputMailbox inputs;
@@ -172,6 +190,7 @@ int main() {
     test_telemetry_requires_contiguous_samples();
     test_anomaly_invalidates_height_until_new_samples();
     test_telemetry_across_clock_wrap();
+    test_long_press_detector_fires_once_and_handles_wrap();
     test_stop_dominates_button_in_both_orders();
     test_reversal_and_buttons_stop_active_motion();
     test_button_slot_replaces_without_queue();

@@ -37,6 +37,24 @@ struct InputSnapshot {
     bool stop_requested = false;
 };
 
+// Edge-triggered detector for buttons whose HID report is sent once on press
+// and once on release. Time is modulo 2^32, matching the controller clock.
+class LongPressDetector {
+   public:
+    explicit LongPressDetector(std::uint32_t threshold) : threshold_(threshold) {}
+
+    void press(std::uint32_t now);
+    bool poll(std::uint32_t now);
+    bool release(std::uint32_t now);
+    void reset();
+
+   private:
+    std::uint32_t threshold_;
+    std::uint32_t pressed_at_ = 0;
+    bool pressed_ = false;
+    bool fired_ = false;
+};
+
 // One replacement slot, no motion queue. All methods require the same lock
 // when used from BLE callbacks and the writer task. STOP dominates every
 // button received before the next consume(), regardless of arrival order.

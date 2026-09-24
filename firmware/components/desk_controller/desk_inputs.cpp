@@ -2,6 +2,36 @@
 
 namespace smart_desk {
 
+void LongPressDetector::press(std::uint32_t now) {
+    if (!pressed_) {
+        pressed_at_ = now;
+        pressed_ = true;
+        fired_ = false;
+    }
+}
+
+bool LongPressDetector::poll(std::uint32_t now) {
+    if (!pressed_ || fired_ ||
+        static_cast<std::uint32_t>(now - pressed_at_) < threshold_) {
+        return false;
+    }
+    fired_ = true;
+    return true;
+}
+
+bool LongPressDetector::release(std::uint32_t now) {
+    const bool fire = poll(now);
+    pressed_ = false;
+    fired_ = false;
+    return fire;
+}
+
+void LongPressDetector::reset() {
+    pressed_at_ = 0;
+    pressed_ = false;
+    fired_ = false;
+}
+
 TelemetryTracker::TelemetryTracker(ControllerConfig config) : config_(config) {}
 
 void TelemetryTracker::receive(const Frame& frame, std::uint32_t now_ms) {
