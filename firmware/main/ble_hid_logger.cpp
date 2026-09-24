@@ -35,6 +35,7 @@ constexpr std::size_t kMaxBondedDevices = 8;
 constexpr TickType_t kDialBurstQuietTime = pdMS_TO_TICKS(400);
 constexpr TickType_t kLongPressThreshold = pdMS_TO_TICKS(4500);
 constexpr TickType_t kForgetBondHoldTime = pdMS_TO_TICKS(5000);
+constexpr TickType_t kCalibrationHoldTime = pdMS_TO_TICKS(10000);
 constexpr std::uint16_t kPlayPauseUsage = 0x00CD;
 
 EventGroupHandle_t g_events = nullptr;
@@ -55,6 +56,8 @@ TickType_t g_sit_press_tick = 0;
 TickType_t g_stand_press_tick = 0;
 smart_desk::LongPressDetector g_forget_bond_button(
     static_cast<std::uint32_t>(kForgetBondHoldTime));
+smart_desk::LongPressDetector g_calibration_button(
+    static_cast<std::uint32_t>(kCalibrationHoldTime));
 int g_dial_direction = 0;
 std::uint32_t g_dial_event_count = 0;
 TickType_t g_dial_last_tick = 0;
@@ -82,6 +85,7 @@ void reset_semantic_state() {
     g_sit_press_tick = 0;
     g_stand_press_tick = 0;
     g_forget_bond_button.reset();
+    g_calibration_button.reset();
     g_dial_direction = 0;
     g_dial_event_count = 0;
     g_dial_last_tick = 0;
@@ -287,48 +291,75 @@ void interpret_consumer_control(const std::uint8_t* bytes,
     const TickType_t now = xTaskGetTickCount();
 
     if (usage == 0x00E9) {
+        publish_action(BleHidActionType::kUserActivity);
         record_dial_event(+1);
         return;
     }
     if (usage == 0x00EA) {
+        publish_action(BleHidActionType::kUserActivity);
         record_dial_event(-1);
         return;
     }
     if (usage == 0x00E2) {
-        ESP_LOGW(kTag, "ACTION STOP (dial press)");
-        publish_action(BleHidActionType::kStop);
+        bool new_press = false;
+        taskENTER_CRITICAL(&g_semantic_lock);
+        new_press =
+            g_calibration_button.press(static_cast<std::uint32_t>(now));
+        taskEXIT_CRITICAL(&g_semantic_lock);
+        if (new_press) {
+            publish_action(BleHidActionType::kUserActivity);
+            ESP_LOGW(kTag,
+                     "ACTION STOP (dial press); hold 10 s for calibration");
+            publish_action(BleHidActionType::kStop);
+        }
         return;
     }
 
     if (usage == 0x00B6) {
+        bool new_press = false;
         taskENTER_CRITICAL(&g_semantic_lock);
         if (!g_sit_pressed) {
             g_sit_pressed = true;
             g_sit_press_tick = now;
+            new_press = true;
         }
         taskEXIT_CRITICAL(&g_semantic_lock);
+        if (new_press) {
+            publish_action(BleHidActionType::kUserActivity);
+        }
         ESP_LOGI(kTag, "SIT pressed");
         return;
     }
     if (usage == 0x00B5) {
+        bool new_press = false;
         taskENTER_CRITICAL(&g_semantic_lock);
         if (!g_stand_pressed) {
             g_stand_pressed = true;
             g_stand_press_tick = now;
+            new_press = true;
         }
         taskEXIT_CRITICAL(&g_semantic_lock);
+        if (new_press) {
+            publish_action(BleHidActionType::kUserActivity);
+        }
         ESP_LOGI(kTag, "STAND pressed");
         return;
     }
     if (usage == kPlayPauseUsage) {
+        bool new_press = false;
         taskENTER_CRITICAL(&g_semantic_lock);
-        g_forget_bond_button.press(static_cast<std::uint32_t>(now));
+        new_press =
+            g_forget_bond_button.press(static_cast<std::uint32_t>(now));
         taskEXIT_CRITICAL(&g_semantic_lock);
+        if (new_press) {
+            publish_action(BleHidActionType::kUserActivity);
+        }
         ESP_LOGI(kTag, "PLAY/PAUSE pressed; hold 5 s to forget BLE bond");
         return;
     }
 
     if (usage != 0) {
+        publish_action(BleHidActionType::kUserActivity);
         return;
     }
 
@@ -337,6 +368,7 @@ void interpret_consumer_control(const std::uint8_t* bytes,
     TickType_t sit_pressed_at = 0;
     TickType_t stand_pressed_at = 0;
     bool forget_bond = false;
+    bool start_calibration = false;
     taskENTER_CRITICAL(&g_semantic_lock);
     if (g_sit_pressed) {
         release_sit = true;
@@ -350,6 +382,8 @@ void interpret_consumer_control(const std::uint8_t* bytes,
     }
     forget_bond =
         g_forget_bond_button.release(static_cast<std::uint32_t>(now));
+    start_calibration =
+        g_calibration_button.release(static_cast<std::uint32_t>(now));
     taskEXIT_CRITICAL(&g_semantic_lock);
 
     if (release_sit) {
@@ -361,6 +395,10 @@ void interpret_consumer_control(const std::uint8_t* bytes,
     if (forget_bond) {
         queue_forget_current_bond();
     }
+    if (start_calibration) {
+        ESP_LOGW(kTag, "ACTION START_CALIBRATION (dial held 10 s)");
+        publish_action(BleHidActionType::kStartCalibration);
+    }
 }
 
 void semantic_timer_task(void*) {
@@ -369,11 +407,14 @@ void semantic_timer_task(void*) {
         std::uint32_t count = 0;
         bool rearmed_after_reversal = false;
         bool forget_bond = false;
+        bool start_calibration = false;
 
         taskENTER_CRITICAL(&g_semantic_lock);
         const TickType_t now = xTaskGetTickCount();
         forget_bond =
             g_forget_bond_button.poll(static_cast<std::uint32_t>(now));
+        start_calibration =
+            g_calibration_button.poll(static_cast<std::uint32_t>(now));
         if (g_dial_cancelled_until_quiet &&
             now - g_dial_last_tick >= kDialBurstQuietTime) {
             g_dial_cancelled_until_quiet = false;
@@ -389,6 +430,10 @@ void semantic_timer_task(void*) {
 
         if (forget_bond) {
             queue_forget_current_bond();
+        }
+        if (start_calibration) {
+            ESP_LOGW(kTag, "ACTION START_CALIBRATION (dial held 10 s)");
+            publish_action(BleHidActionType::kStartCalibration);
         }
         process_forget_bond_request();
 

@@ -80,6 +80,26 @@ std::optional<ControllerMessage> decode_controller_frame(const Frame& frame) {
                              frame[6]};
 }
 
+ControllerFrameKind classify_controller_frame(const Frame& frame) {
+    if (!is_valid_frame(frame, Direction::kControllerToPanel)) {
+        return ControllerFrameKind::kUnknown;
+    }
+    if (frame[3] == 0x02) {
+        return ControllerFrameKind::kHeight;
+    }
+    constexpr Frame kStartupFrame{0x55, 0xAA, 0x08, 0x0F,
+                                  0x00, 0x0F, 0x01, 0x25};
+    constexpr Frame kResetFrame{0x55, 0xAA, 0x08, 0x04,
+                                0x00, 0x01, 0x01, 0x0C};
+    if (frame == kStartupFrame) {
+        return ControllerFrameKind::kStartup;
+    }
+    if (frame == kResetFrame) {
+        return ControllerFrameKind::kReset;
+    }
+    return ControllerFrameKind::kUnknown;
+}
+
 const char* command_name(std::uint8_t command_code) {
     switch (command_code) {
         case 0x00: return "IDLE";

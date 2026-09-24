@@ -2,12 +2,14 @@
 
 namespace smart_desk {
 
-void LongPressDetector::press(std::uint32_t now) {
-    if (!pressed_) {
-        pressed_at_ = now;
-        pressed_ = true;
-        fired_ = false;
+bool LongPressDetector::press(std::uint32_t now) {
+    if (pressed_) {
+        return false;
     }
+    pressed_at_ = now;
+    pressed_ = true;
+    fired_ = false;
+    return true;
 }
 
 bool LongPressDetector::poll(std::uint32_t now) {
@@ -35,6 +37,20 @@ void LongPressDetector::reset() {
 TelemetryTracker::TelemetryTracker(ControllerConfig config) : config_(config) {}
 
 void TelemetryTracker::receive(const Frame& frame, std::uint32_t now_ms) {
+    const auto kind = classify_controller_frame(frame);
+    if (kind != ControllerFrameKind::kHeight) {
+        available_ = false;
+        state_.stable_frames = 0;
+        ++state_.anomaly_sequence;
+        if (kind == ControllerFrameKind::kReset) {
+            ++state_.reset_frame_sequence;
+        } else if (kind == ControllerFrameKind::kUnknown) {
+            ++state_.unknown_frame_sequence;
+        }
+        return;
+    }
+
+    ++state_.height_frame_sequence;
     const auto message = decode_controller_frame(frame);
     if (!message || message->flags != 0 ||
         (message->status != 0x01 && message->status != 0x02) ||
@@ -101,10 +117,19 @@ void InputMailbox::stop() {
     pending_.button = ButtonRequest::kNone;
 }
 
+void InputMailbox::request_calibration() {
+    pending_.calibration_requested = true;
+}
+
+void InputMailbox::user_activity() {
+    ++pending_.user_activity_sequence;
+}
+
 InputSnapshot InputMailbox::consume() {
     const auto snapshot = pending_;
     pending_.button = ButtonRequest::kNone;
     pending_.stop_requested = false;
+    pending_.calibration_requested = false;
     return snapshot;
 }
 

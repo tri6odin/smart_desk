@@ -9,6 +9,9 @@ struct TelemetrySnapshot {
     bool fresh = false;
     std::uint32_t stable_frames = 0;
     std::uint32_t anomaly_sequence = 0;
+    std::uint32_t height_frame_sequence = 0;
+    std::uint32_t reset_frame_sequence = 0;
+    std::uint32_t unknown_frame_sequence = 0;
 };
 
 // Pure state: the ESP adapter must serialize receive() and snapshot(). Time
@@ -35,6 +38,8 @@ struct InputSnapshot {
     std::uint32_t last_dial_ms = 0;
     ButtonRequest button = ButtonRequest::kNone;
     bool stop_requested = false;
+    bool calibration_requested = false;
+    std::uint32_t user_activity_sequence = 0;
 };
 
 // Edge-triggered detector for buttons whose HID report is sent once on press
@@ -43,7 +48,8 @@ class LongPressDetector {
    public:
     explicit LongPressDetector(std::uint32_t threshold) : threshold_(threshold) {}
 
-    void press(std::uint32_t now);
+    // Returns true only for the first report of a physical press.
+    bool press(std::uint32_t now);
     bool poll(std::uint32_t now);
     bool release(std::uint32_t now);
     void reset();
@@ -63,6 +69,8 @@ class InputMailbox {
     void dial(int direction, std::uint32_t now_ms);
     void button(ButtonRequest request);
     void stop();
+    void request_calibration();
+    void user_activity();
     InputSnapshot consume();
     void set_controller_state(ControlState state, int direction) {
         state_ = state;

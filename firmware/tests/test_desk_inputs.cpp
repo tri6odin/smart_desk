@@ -1,4 +1,5 @@
 #include "desk_inputs.hpp"
+#include "desk_recovery.hpp"
 
 #include <cstdlib>
 #include <iostream>
@@ -25,6 +26,13 @@ Frame height_frame(std::uint16_t height, std::uint8_t status = 1) {
                 static_cast<std::uint8_t>(height),
                 status,
                 0};
+    frame[7] = calculate_checksum(frame);
+    return frame;
+}
+
+Frame service_frame(std::uint8_t type, std::uint8_t byte4,
+                    std::uint8_t byte5, std::uint8_t status) {
+    Frame frame{0x55, 0xAA, 8, type, byte4, byte5, status, 0};
     frame[7] = calculate_checksum(frame);
     return frame;
 }
@@ -75,7 +83,8 @@ void test_telemetry_across_clock_wrap() {
 
 void test_long_press_detector_fires_once_and_handles_wrap() {
     LongPressDetector detector(5000);
-    detector.press(100);
+    CHECK(detector.press(100));
+    CHECK(!detector.press(200));
     CHECK(!detector.poll(5099));
     CHECK(detector.poll(5100));
     CHECK(!detector.poll(6000));
@@ -89,6 +98,186 @@ void test_long_press_detector_fires_once_and_handles_wrap() {
     CHECK(detector.poll(4000));
     detector.reset();
     CHECK(!detector.poll(10000));
+}
+
+void test_tracker_separates_known_service_and_unknown_frames() {
+    TelemetryTracker tracker;
+    tracker.receive(service_frame(0x0F, 0x00, 0x0F, 0x01), 0);
+    auto snapshot = tracker.snapshot(0);
+    CHECK(snapshot.unknown_frame_sequence == 0);
+    CHECK(snapshot.reset_frame_sequence == 0);
+
+    tracker.receive(service_frame(0x04, 0x00, 0x01, 0x01), 100);
+    snapshot = tracker.snapshot(100);
+    CHECK(snapshot.reset_frame_sequence == 1);
+    CHECK(snapshot.unknown_frame_sequence == 0);
+
+    tracker.receive(service_frame(0x05, 0x00, 0x01, 0x01), 200);
+    snapshot = tracker.snapshot(200);
+    CHECK(snapshot.reset_frame_sequence == 1);
+    CHECK(snapshot.unknown_frame_sequence == 1);
+
+    tracker.receive(height_frame(700), 300);
+    snapshot = tracker.snapshot(300);
+    CHECK(snapshot.height_frame_sequence == 1);
+    CHECK(snapshot.fresh);
+}
+
+void test_recovery_ignores_height_until_rst_then_unlocks() {
+    DeskRecoveryController recovery;
+    RecoveryInput input;
+    input.telemetry_fresh = true;
+    input.telemetry_stable_frames = 5;
+
+    input.unknown_frame_sequence = 1;
+    auto result = recovery.update(input);
+    CHECK(result.state == RecoveryState::kLocked);
+    CHECK(result.command == Command::kIdle);
+    CHECK(result.override_motion);
+
+    input.now_ms = 50;
+    input.unknown_frame_sequence = 2;
+    result = recovery.update(input);
+    CHECK(result.state == RecoveryState::kLocked);
+    CHECK(result.reason == RecoveryReason::kNone);
+    CHECK(!result.reset_motion_controller);
+
+    input.now_ms = 100;
+    input.calibration_requested = true;
+    input.user_activity_sequence = 4;
+    result = recovery.update(input);
+    CHECK(result.state == RecoveryState::kCalibrating);
+    CHECK(result.command == Command::kDownHold);
+
+    input.calibration_requested = false;
+    input.now_ms = 20000;
+    input.height_frame_sequence = 100;
+    input.telemetry_fresh = false;
+    input.telemetry_stable_frames = 0;
+    result = recovery.update(input);
+    CHECK(result.state == RecoveryState::kCalibrating);
+    CHECK(result.command == Command::kDownHold);
+
+    input.now_ms = 25000;
+    input.reset_frame_sequence = 1;
+    result = recovery.update(input);
+    CHECK(result.state == RecoveryState::kAwaitingTelemetry);
+    CHECK(result.command == Command::kIdle);
+
+    input.now_ms = 25500;
+    input.height_frame_sequence = 101;
+    input.telemetry_fresh = true;
+    input.telemetry_stable_frames = 3;
+    result = recovery.update(input);
+    CHECK(result.state == RecoveryState::kReady);
+    CHECK(result.override_motion);  // Emit one final IDLE; no input may leak through.
+    CHECK(result.reset_motion_controller);
+    input.now_ms = 25600;
+    result = recovery.update(input);
+    CHECK(result.state == RecoveryState::kReady);
+    CHECK(!result.override_motion);
+}
+
+void test_any_new_user_activity_cancels_calibration() {
+    DeskRecoveryController recovery;
+    RecoveryInput input;
+    input.calibration_requested = true;
+    input.user_activity_sequence = 10;
+    auto result = recovery.update(input);
+    CHECK(result.state == RecoveryState::kCalibrating);
+
+    input.calibration_requested = false;
+    input.now_ms = 100;
+    input.user_activity_sequence = 11;
+    result = recovery.update(input);
+    CHECK(result.state == RecoveryState::kReady);
+    CHECK(result.command == Command::kIdle);
+    CHECK(result.reason == RecoveryReason::kCalibrationCancelled);
+    input.now_ms = 150;
+    result = recovery.update(input);
+    CHECK(result.suppress_normal_input);
+    input.now_ms = 175;
+    input.user_activity_sequence = 12;
+    result = recovery.update(input);
+    CHECK(!result.suppress_normal_input);
+
+    input.now_ms = 200;
+    input.unknown_frame_sequence = 1;
+    result = recovery.update(input);
+    CHECK(result.state == RecoveryState::kLocked);
+    input.now_ms = 300;
+    input.calibration_requested = true;
+    result = recovery.update(input);
+    CHECK(result.state == RecoveryState::kCalibrating);
+    input.calibration_requested = false;
+    input.now_ms = 400;
+    input.user_activity_sequence = 13;
+    result = recovery.update(input);
+    CHECK(result.state == RecoveryState::kLocked);
+}
+
+void test_calibration_timeout_locks_until_new_rst_attempt() {
+    RecoveryConfig config;
+    config.calibration_timeout_ms = 1000;
+    DeskRecoveryController recovery(config);
+    RecoveryInput input;
+    input.calibration_requested = true;
+    recovery.update(input);
+    input.calibration_requested = false;
+    input.now_ms = 1000;
+    const auto result = recovery.update(input);
+    CHECK(result.state == RecoveryState::kLocked);
+    CHECK(result.reason == RecoveryReason::kCalibrationTimeout);
+}
+
+void test_unknown_frame_stops_active_calibration_immediately() {
+    DeskRecoveryController recovery;
+    RecoveryInput input;
+    input.calibration_requested = true;
+    auto result = recovery.update(input);
+    CHECK(result.state == RecoveryState::kCalibrating);
+    CHECK(result.command == Command::kDownHold);
+
+    input.calibration_requested = false;
+    input.now_ms = 100;
+    input.unknown_frame_sequence = 1;
+    result = recovery.update(input);
+    CHECK(result.state == RecoveryState::kLocked);
+    CHECK(result.command == Command::kIdle);
+    CHECK(result.override_motion);
+    CHECK(result.reset_motion_controller);
+    CHECK(result.reason == RecoveryReason::kUnknownControllerFrame);
+
+    // Even a later RST cannot unlock a stopped attempt. The operator must
+    // explicitly start calibration again with a new 10-second hold.
+    input.now_ms = 200;
+    input.reset_frame_sequence = 1;
+    result = recovery.update(input);
+    CHECK(result.state == RecoveryState::kLocked);
+    CHECK(result.command == Command::kIdle);
+}
+
+void test_unknown_frame_beats_simultaneous_calibration_request() {
+    DeskRecoveryController recovery;
+    RecoveryInput input;
+    input.unknown_frame_sequence = 1;
+    input.calibration_requested = true;
+    const auto result = recovery.update(input);
+    CHECK(result.state == RecoveryState::kLocked);
+    CHECK(result.command == Command::kIdle);
+    CHECK(result.reason == RecoveryReason::kUnknownControllerFrame);
+}
+
+void test_persisted_recovery_lock_starts_blocked() {
+    DeskRecoveryController recovery({}, true);
+    RecoveryInput input;
+    auto result = recovery.update(input);
+    CHECK(result.state == RecoveryState::kLocked);
+    CHECK(result.override_motion);
+    input.calibration_requested = true;
+    result = recovery.update(input);
+    CHECK(result.state == RecoveryState::kCalibrating);
+    CHECK(result.command == Command::kDownHold);
 }
 
 void test_stop_dominates_button_in_both_orders() {
@@ -133,6 +322,18 @@ void test_button_slot_replaces_without_queue() {
     inputs.button(ButtonRequest::kGoStand);
     CHECK(inputs.consume().button == ButtonRequest::kGoStand);
     CHECK(inputs.consume().button == ButtonRequest::kNone);
+}
+
+void test_calibration_request_is_edge_triggered_and_activity_is_monotonic() {
+    InputMailbox inputs;
+    inputs.user_activity();
+    inputs.request_calibration();
+    auto snapshot = inputs.consume();
+    CHECK(snapshot.user_activity_sequence == 1);
+    CHECK(snapshot.calibration_requested);
+    snapshot = inputs.consume();
+    CHECK(snapshot.user_activity_sequence == 1);
+    CHECK(!snapshot.calibration_requested);
 }
 
 void test_disconnect_cancels_inputs_end_to_end() {
@@ -191,9 +392,17 @@ int main() {
     test_anomaly_invalidates_height_until_new_samples();
     test_telemetry_across_clock_wrap();
     test_long_press_detector_fires_once_and_handles_wrap();
+    test_tracker_separates_known_service_and_unknown_frames();
+    test_recovery_ignores_height_until_rst_then_unlocks();
+    test_any_new_user_activity_cancels_calibration();
+    test_calibration_timeout_locks_until_new_rst_attempt();
+    test_unknown_frame_stops_active_calibration_immediately();
+    test_unknown_frame_beats_simultaneous_calibration_request();
+    test_persisted_recovery_lock_starts_blocked();
     test_stop_dominates_button_in_both_orders();
     test_reversal_and_buttons_stop_active_motion();
     test_button_slot_replaces_without_queue();
+    test_calibration_request_is_edge_triggered_and_activity_is_monotonic();
     test_disconnect_cancels_inputs_end_to_end();
     test_settled_preset_survives_ble_mailbox_and_fsm();
     return failures == 0 ? EXIT_SUCCESS : EXIT_FAILURE;

@@ -31,6 +31,7 @@ add_test(NAME desk_protocol COMMAND test_desk_protocol)
 add_library(desk_controller
     ../components/desk_controller/desk_controller.cpp
     ../components/desk_controller/desk_inputs.cpp
+    ../components/desk_controller/desk_recovery.cpp
 )
 target_include_directories(desk_controller PUBLIC
     ../components/desk_controller/include

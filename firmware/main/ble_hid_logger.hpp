@@ -9,6 +9,8 @@ enum class BleHidActionType {
     kSaveSit,
     kSaveStand,
     kDisconnected,
+    kUserActivity,
+    kStartCalibration,
 };
 
 struct BleHidAction {

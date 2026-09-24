@@ -144,6 +144,11 @@ void ble_motion_action(const BleHidAction& action, void*) {
             ESP_LOGW("desk.ble_test",
                      "preset action ignored in one-shot motion test");
             break;
+        case BleHidActionType::kUserActivity:
+        case BleHidActionType::kStartCalibration:
+            // Recovery is a production-only control path. Lab motion modes
+            // deliberately ignore its internal BLE notifications.
+            break;
     }
 }
 #endif

@@ -15,6 +15,13 @@ enum class Direction {
     kControllerToPanel,
 };
 
+enum class ControllerFrameKind {
+    kHeight,
+    kStartup,
+    kReset,
+    kUnknown,
+};
+
 enum class Command : std::uint8_t {
     kIdle = 0x00,
     kRecallStand = 0x01,
@@ -49,6 +56,7 @@ bool is_valid_frame(const Frame& frame, Direction direction);
 Frame make_panel_frame(Command command, std::uint8_t status = 0x01);
 std::optional<PanelMessage> decode_panel_frame(const Frame& frame);
 std::optional<ControllerMessage> decode_controller_frame(const Frame& frame);
+ControllerFrameKind classify_controller_frame(const Frame& frame);
 const char* command_name(std::uint8_t command_code);
 
 // Потоковый парсер принимает по одному байту, ищет заголовок направления,

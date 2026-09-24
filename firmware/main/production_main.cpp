@@ -4,6 +4,7 @@
 
 #include "ble_hid_logger.hpp"
 #include "desk_inputs.hpp"
+#include "desk_recovery.hpp"
 #include "preset_store.hpp"
 #include "uart_transport.hpp"
 #include "esp_log.h"
@@ -49,8 +50,11 @@ void ble_motion_action(const BleHidAction& action, void*) {
     portENTER_CRITICAL(&g_inputs_mux);
     switch (action.type) {
         case BleHidActionType::kDialRaw: g_inputs.dial(action.value, now_ms()); break;
-        case BleHidActionType::kStop:
-        case BleHidActionType::kDisconnected: g_inputs.stop(); break;
+        case BleHidActionType::kStop: g_inputs.stop(); break;
+        case BleHidActionType::kDisconnected:
+            g_inputs.user_activity();
+            g_inputs.stop();
+            break;
         case BleHidActionType::kGoSit: g_inputs.button(ButtonRequest::kGoSit); break;
         case BleHidActionType::kGoStand:
             g_inputs.button(ButtonRequest::kGoStand);
@@ -62,6 +66,10 @@ void ble_motion_action(const BleHidAction& action, void*) {
             g_inputs.button(ButtonRequest::kSaveStand);
             break;
         case BleHidActionType::kDialDelta: break;  // Production uses raw reports.
+        case BleHidActionType::kUserActivity: g_inputs.user_activity(); break;
+        case BleHidActionType::kStartCalibration:
+            g_inputs.request_calibration();
+            break;
     }
     portEXIT_CRITICAL(&g_inputs_mux);
 }
@@ -83,6 +91,15 @@ void reader_task(void*) {
             g_telemetry.receive(*frame, now_ms());
             portEXIT_CRITICAL(&g_inputs_mux);
             if (!have_last_frame || *frame != last_frame) {
+                const auto kind = smart_desk::classify_controller_frame(*frame);
+                if (kind == smart_desk::ControllerFrameKind::kReset) {
+                    ESP_LOGW("desk.controller", "RST frame received");
+                } else if (kind ==
+                           smart_desk::ControllerFrameKind::kUnknown) {
+                    ESP_LOGE(
+                        "desk.controller",
+                        "unknown valid frame; motion locked until successful RST");
+                }
                 ESP_LOG_BUFFER_HEX_LEVEL("desk.controller", frame->data(),
                                          frame->size(), ESP_LOG_INFO);
                 last_frame = *frame;
@@ -109,6 +126,15 @@ void panel_writer_task(void*) {
     controller_config.sit_target_tenths_cm = presets.sit;
     controller_config.stand_target_tenths_cm = presets.stand;
     smart_desk::DeskController controller(controller_config);
+    const bool persisted_recovery_lock = smart_desk::load_recovery_lock();
+    smart_desk::DeskRecoveryController recovery({}, persisted_recovery_lock);
+    bool recovery_lock_persisted = persisted_recovery_lock;
+    bool recovery_lock_save_attempted = false;
+    std::uint32_t recovery_lock_last_attempt_ms = 0;
+    if (persisted_recovery_lock) {
+        ESP_LOGE("desk.recovery",
+                 "persistent motion lock active; hold dial 10 s to calibrate");
+    }
 
     // Ignore any BLE reports received while this task was being created.
     smart_desk::ControllerInput initial_input;
@@ -116,6 +142,7 @@ void panel_writer_task(void*) {
     initial_input.stop_requested = true;
     controller.update(initial_input);
     smart_desk::ControlState logged_state = controller.state();
+    smart_desk::RecoveryState logged_recovery_state = recovery.state();
     TickType_t last_wake = xTaskGetTickCount();
 
     while (true) {
@@ -126,6 +153,81 @@ void panel_writer_task(void*) {
         const bool control_fresh = telemetry.fresh;
         const bool control_settled =
             telemetry.stable_frames >= controller.config().full_settle_frames;
+
+        smart_desk::RecoveryInput recovery_input;
+        recovery_input.now_ms = inputs.now_ms;
+        recovery_input.height_frame_sequence = telemetry.height_frame_sequence;
+        recovery_input.reset_frame_sequence = telemetry.reset_frame_sequence;
+        recovery_input.unknown_frame_sequence = telemetry.unknown_frame_sequence;
+        recovery_input.user_activity_sequence = dial.user_activity_sequence;
+        recovery_input.telemetry_stable_frames = telemetry.stable_frames;
+        recovery_input.telemetry_fresh = telemetry.fresh;
+        recovery_input.calibration_requested = dial.calibration_requested;
+        const auto recovery_output = recovery.update(recovery_input);
+        if (recovery_output.reset_motion_controller) {
+            const auto current_config = controller.config();
+            controller = smart_desk::DeskController(current_config);
+            smart_desk::ControllerInput sync_input;
+            sync_input.now_ms = inputs.now_ms;
+            sync_input.dial_sequence = dial.dial_sequence;
+            sync_input.stop_requested = true;
+            controller.update(sync_input);
+            logged_state = controller.state();
+        }
+        // Send the safety override before logging or NVS writes. A persistent
+        // lock must never delay the first IDLE after an unexpected frame.
+        if (recovery_output.override_motion ||
+            recovery_output.suppress_normal_input) {
+            portENTER_CRITICAL(&g_inputs_mux);
+            g_inputs.set_controller_state(smart_desk::ControlState::kIdle, 0);
+            portEXIT_CRITICAL(&g_inputs_mux);
+            if (transmit(recovery_output.command)) {
+                g_panel_heartbeat.fetch_add(1);
+            } else {
+                portENTER_CRITICAL(&g_inputs_mux);
+                g_inputs.stop();
+                g_inputs.user_activity();
+                portEXIT_CRITICAL(&g_inputs_mux);
+            }
+        }
+
+        if (recovery_output.state == smart_desk::RecoveryState::kLocked &&
+            !recovery_lock_persisted &&
+            (!recovery_lock_save_attempted ||
+             static_cast<std::uint32_t>(
+                 inputs.now_ms - recovery_lock_last_attempt_ms) >= 1000)) {
+            recovery_lock_save_attempted = true;
+            recovery_lock_last_attempt_ms = inputs.now_ms;
+            if (!smart_desk::save_recovery_lock(true)) {
+                ESP_LOGE("desk.recovery", "could not persist motion lock");
+            } else {
+                recovery_lock_persisted = true;
+            }
+        } else if (recovery_output.reason ==
+                   smart_desk::RecoveryReason::kCalibrationComplete) {
+            if (recovery_lock_persisted &&
+                !smart_desk::save_recovery_lock(false)) {
+                ESP_LOGE("desk.recovery", "could not clear persistent motion lock");
+            } else {
+                recovery_lock_persisted = false;
+            }
+        }
+
+        if (recovery_output.reason != smart_desk::RecoveryReason::kNone ||
+            recovery_output.state != logged_recovery_state) {
+            ESP_LOGW("desk.recovery", "%s -> %s: %s",
+                     smart_desk::recovery_state_name(logged_recovery_state),
+                     smart_desk::recovery_state_name(recovery_output.state),
+                     smart_desk::recovery_reason_name(recovery_output.reason));
+            logged_recovery_state = recovery_output.state;
+        }
+
+        if (recovery_output.override_motion ||
+            recovery_output.suppress_normal_input) {
+            xTaskDelayUntil(&last_wake, kPanelPeriod);
+            continue;
+        }
+
         bool stop_requested = dial.stop_requested;
         const auto raw_request = dial.button;
 
@@ -256,7 +358,7 @@ void panel_watchdog_task(void*) {
 
 extern "C" void app_main() {
     ESP_LOGW("smart_desk", "BLE CONTROLLER; original panel must be disconnected");
-    ESP_LOGW("smart_desk", "SIT=80 cm, STAND=115 cm, limits=70..120 cm; no queue");
+    ESP_LOGW("smart_desk", "SIT/STAND from NVS; limits=72..118 cm; no queue");
     ESP_LOGI("smart_desk", "GPIO17=TX; GPIO18=height RX");
 
     configure_uart(UART_NUM_1, kTxGpio, kRxGpio);

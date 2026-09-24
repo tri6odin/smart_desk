@@ -1,5 +1,5 @@
 idf_component_register(
-    SRCS "desk_controller.cpp" "desk_inputs.cpp"
+    SRCS "desk_controller.cpp" "desk_inputs.cpp" "desk_recovery.cpp"
     INCLUDE_DIRS "include"
     REQUIRES desk_protocol
 )

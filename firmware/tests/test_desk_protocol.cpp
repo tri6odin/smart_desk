@@ -121,6 +121,25 @@ void test_unknown_command_is_preserved() {
     CHECK(std::string(smart_desk::command_name(0x7A)) == "UNKNOWN");
 }
 
+void test_controller_service_frame_classification() {
+    using namespace smart_desk;
+    const Frame height{0x55, 0xAA, 0x08, 0x02, 0x02, 0xBC, 0x01, 0xC7};
+    const Frame startup{0x55, 0xAA, 0x08, 0x0F, 0x00, 0x0F, 0x01, 0x25};
+    const Frame reset{0x55, 0xAA, 0x08, 0x04, 0x00, 0x01, 0x01, 0x0C};
+    Frame unknown{0x55, 0xAA, 0x08, 0x05, 0x00, 0x01, 0x01, 0x00};
+    unknown[7] = calculate_checksum(unknown);
+    Frame malformed_reset = reset;
+    malformed_reset[5] = 0x02;
+    malformed_reset[7] = calculate_checksum(malformed_reset);
+
+    CHECK(classify_controller_frame(height) == ControllerFrameKind::kHeight);
+    CHECK(classify_controller_frame(startup) == ControllerFrameKind::kStartup);
+    CHECK(classify_controller_frame(reset) == ControllerFrameKind::kReset);
+    CHECK(classify_controller_frame(unknown) == ControllerFrameKind::kUnknown);
+    CHECK(classify_controller_frame(malformed_reset) ==
+          ControllerFrameKind::kUnknown);
+}
+
 }  // namespace
 
 int main() {
@@ -130,6 +149,7 @@ int main() {
     test_bad_checksum_is_rejected();
     test_stream_parser_recovers_after_noise();
     test_unknown_command_is_preserved();
+    test_controller_service_frame_classification();
 
     if (failures != 0) {
         std::cerr << failures << " test(s) failed\n";

@@ -11,6 +11,7 @@
 | `components/desk_protocol` | Кодирование и потоковый разбор UART |
 | `components/desk_controller/desk_controller.cpp` | Переходы FSM, пределы, торможение, watchdog |
 | `components/desk_controller/desk_inputs.cpp` | Проверка телеметрии и единый слот BLE-входов, без ESP-IDF |
+| `components/desk_controller/desk_recovery.cpp` | Блокировка неизвестных ответов и автомат RST-калибровки |
 | `main/production_main.cpp` | Production-задачи RX/TX, снимок входов, heartbeat, привязка к BLE |
 | `main/preset_store.cpp` | Загрузка/сохранение SIT/STAND в прежних ключах NVS |
 | `main/uart_transport.cpp` | Общая конфигурация UART для всех режимов |
