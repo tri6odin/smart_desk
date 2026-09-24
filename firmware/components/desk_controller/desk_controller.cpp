@@ -171,10 +171,10 @@ ControllerOutput DeskController::update_idle(const ControllerInput& input,
         const std::uint16_t distance = input.height_tenths_cm >= target
                                            ? input.height_tenths_cm - target
                                            : target - input.height_tenths_cm;
-        const std::uint16_t coast = target > input.height_tenths_cm
-                                        ? config_.up_coast_tenths_cm
-                                        : config_.down_coast_tenths_cm;
-        if (distance <= coast || distance <= 10) {
+        // Preserve the proven pre-refactor behavior: a preset farther than
+        // one centimetre away must emit a command. Coast compensation decides
+        // when an active HOLD stops; it must not suppress the initial command.
+        if (distance <= 10) {
             return output(command, TransitionReason::kAlreadyAtTarget);
         }
         begin_motion(input, target > input.height_tenths_cm ? 1 : -1, target);

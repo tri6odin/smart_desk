@@ -554,12 +554,15 @@ void test_expired_dial_cannot_start_motion() {
     }
 }
 
-void test_preset_does_not_pulse_hold_inside_braking_zone() {
+void test_preset_starts_inside_coast_zone_when_more_than_one_cm_away() {
     for (const auto request : {ControlRequest::kGoSit, ControlRequest::kGoStand}) {
         DeskController controller;
         auto input = stable_input(0, request == ControlRequest::kGoSit ? 815 : 1130);
         input.request = request;
-        CHECK(controller.update(input).command == Command::kIdle);
+        const auto result = controller.update(input);
+        CHECK(result.state == ControlState::kPresetHold);
+        CHECK(result.command == (request == ControlRequest::kGoSit
+                                     ? Command::kDownHold : Command::kUpHold));
     }
 }
 
@@ -795,7 +798,7 @@ int main() {
     test_generated_input_sequences_preserve_safety_invariants();
     test_preset_consumes_overlapping_dial_even_when_rejected();
     test_expired_dial_cannot_start_motion();
-    test_preset_does_not_pulse_hold_inside_braking_zone();
+    test_preset_starts_inside_coast_zone_when_more_than_one_cm_away();
     test_classification_rechecks_limits_before_step();
     test_step_survives_normal_writer_sampling_delay();
     test_invalid_height_stops_hold_in_both_directions();
