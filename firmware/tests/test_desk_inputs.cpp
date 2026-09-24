@@ -100,6 +100,65 @@ void test_long_press_detector_fires_once_and_handles_wrap() {
     CHECK(!detector.poll(10000));
 }
 
+void test_preset_gesture_detector_keeps_single_button_behavior() {
+    PresetGestureDetector detector(10000);
+    auto press = detector.press(PresetButton::kSit, 100);
+    CHECK(press.new_press);
+    CHECK(!press.chord_started);
+    press = detector.press(PresetButton::kSit, 200);
+    CHECK(!press.new_press);
+    CHECK(!press.chord_started);
+    CHECK(!detector.poll(20000));
+
+    const auto release = detector.release(5100);
+    CHECK(release.sit_pressed);
+    CHECK(!release.stand_pressed);
+    CHECK(release.sit_duration == 5000);
+    CHECK(!release.suppress_presets);
+    CHECK(!release.start_calibration);
+}
+
+void test_preset_chord_fires_once_in_both_press_orders() {
+    for (const bool sit_first : {false, true}) {
+        PresetGestureDetector detector(10000);
+        const auto first = detector.press(
+            sit_first ? PresetButton::kSit : PresetButton::kStand, 100);
+        CHECK(first.new_press);
+        CHECK(!first.chord_started);
+        const auto second = detector.press(
+            sit_first ? PresetButton::kStand : PresetButton::kSit, 200);
+        CHECK(second.new_press);
+        CHECK(second.chord_started);
+        CHECK(!detector.poll(10199));
+        CHECK(detector.poll(10200));
+        CHECK(!detector.poll(10300));
+
+        const auto release = detector.release(11000);
+        CHECK(release.sit_pressed);
+        CHECK(release.stand_pressed);
+        CHECK(release.suppress_presets);
+        CHECK(!release.start_calibration);
+    }
+}
+
+void test_preset_chord_release_handles_threshold_and_early_cancel() {
+    PresetGestureDetector detector(10000);
+    detector.press(PresetButton::kSit, 100);
+    detector.press(PresetButton::kStand, 200);
+    auto release = detector.release(10199);
+    CHECK(release.suppress_presets);
+    CHECK(!release.start_calibration);
+
+    detector.press(PresetButton::kStand, 20000);
+    detector.press(PresetButton::kSit, 21000);
+    release = detector.release(31000);
+    CHECK(release.suppress_presets);
+    CHECK(release.start_calibration);
+
+    detector.reset();
+    CHECK(!detector.poll(50000));
+}
+
 void test_tracker_separates_known_service_and_unknown_frames() {
     TelemetryTracker tracker;
     tracker.receive(service_frame(0x0F, 0x00, 0x0F, 0x01), 0);
@@ -418,6 +477,9 @@ int main() {
     test_anomaly_invalidates_height_until_new_samples();
     test_telemetry_across_clock_wrap();
     test_long_press_detector_fires_once_and_handles_wrap();
+    test_preset_gesture_detector_keeps_single_button_behavior();
+    test_preset_chord_fires_once_in_both_press_orders();
+    test_preset_chord_release_handles_threshold_and_early_cancel();
     test_tracker_separates_known_service_and_unknown_frames();
     test_recovery_ignores_height_until_rst_then_unlocks();
     test_any_new_user_activity_cancels_calibration();

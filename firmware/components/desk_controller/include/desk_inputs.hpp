@@ -61,6 +61,44 @@ class LongPressDetector {
     bool fired_ = false;
 };
 
+enum class PresetButton { kSit, kStand };
+
+struct PresetPressResult {
+    bool new_press = false;
+    bool chord_started = false;
+};
+
+struct PresetReleaseResult {
+    bool sit_pressed = false;
+    bool stand_pressed = false;
+    std::uint32_t sit_duration = 0;
+    std::uint32_t stand_duration = 0;
+    bool suppress_presets = false;
+    bool start_calibration = false;
+};
+
+// Tracks the two preset buttons and recognizes their simultaneous hold. HID
+// reports both buttons as usages in one Consumer Control stream and sends one
+// zero usage when the active button set is released.
+class PresetGestureDetector {
+   public:
+    explicit PresetGestureDetector(std::uint32_t chord_threshold)
+        : chord_(chord_threshold) {}
+
+    PresetPressResult press(PresetButton button, std::uint32_t now);
+    bool poll(std::uint32_t now);
+    PresetReleaseResult release(std::uint32_t now);
+    void reset();
+
+   private:
+    LongPressDetector chord_;
+    std::uint32_t sit_pressed_at_ = 0;
+    std::uint32_t stand_pressed_at_ = 0;
+    bool sit_pressed_ = false;
+    bool stand_pressed_ = false;
+    bool chord_seen_ = false;
+};
+
 // One replacement slot, no motion queue. All methods require the same lock
 // when used from BLE callbacks and the writer task. STOP dominates every
 // button received before the next consume(), regardless of arrival order.

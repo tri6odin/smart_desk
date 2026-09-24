@@ -34,6 +34,55 @@ void LongPressDetector::reset() {
     fired_ = false;
 }
 
+PresetPressResult PresetGestureDetector::press(PresetButton button,
+                                               std::uint32_t now) {
+    bool* pressed = button == PresetButton::kSit ? &sit_pressed_
+                                                 : &stand_pressed_;
+    std::uint32_t* pressed_at = button == PresetButton::kSit
+                                    ? &sit_pressed_at_
+                                    : &stand_pressed_at_;
+    PresetPressResult result;
+    if (!*pressed) {
+        *pressed = true;
+        *pressed_at = now;
+        result.new_press = true;
+    }
+    if (sit_pressed_ && stand_pressed_) {
+        chord_seen_ = true;
+        result.chord_started = chord_.press(now);
+    }
+    return result;
+}
+
+bool PresetGestureDetector::poll(std::uint32_t now) {
+    return chord_.poll(now);
+}
+
+PresetReleaseResult PresetGestureDetector::release(std::uint32_t now) {
+    PresetReleaseResult result;
+    result.sit_pressed = sit_pressed_;
+    result.stand_pressed = stand_pressed_;
+    result.sit_duration = now - sit_pressed_at_;
+    result.stand_duration = now - stand_pressed_at_;
+    result.suppress_presets = chord_seen_;
+    result.start_calibration = chord_.release(now);
+    sit_pressed_at_ = 0;
+    stand_pressed_at_ = 0;
+    sit_pressed_ = false;
+    stand_pressed_ = false;
+    chord_seen_ = false;
+    return result;
+}
+
+void PresetGestureDetector::reset() {
+    chord_.reset();
+    sit_pressed_at_ = 0;
+    stand_pressed_at_ = 0;
+    sit_pressed_ = false;
+    stand_pressed_ = false;
+    chord_seen_ = false;
+}
+
 TelemetryTracker::TelemetryTracker(ControllerConfig config) : config_(config) {}
 
 void TelemetryTracker::receive(const Frame& frame, std::uint32_t now_ms) {

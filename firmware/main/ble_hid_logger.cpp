@@ -50,13 +50,9 @@ portMUX_TYPE g_bonds_lock = portMUX_INITIALIZER_UNLOCKED;
 bool g_publish_delayed_dial_delta = true;
 
 portMUX_TYPE g_semantic_lock = portMUX_INITIALIZER_UNLOCKED;
-bool g_sit_pressed = false;
-bool g_stand_pressed = false;
-TickType_t g_sit_press_tick = 0;
-TickType_t g_stand_press_tick = 0;
 smart_desk::LongPressDetector g_forget_bond_button(
     static_cast<std::uint32_t>(kForgetBondHoldTime));
-smart_desk::LongPressDetector g_calibration_button(
+smart_desk::PresetGestureDetector g_preset_buttons(
     static_cast<std::uint32_t>(kCalibrationHoldTime));
 int g_dial_direction = 0;
 std::uint32_t g_dial_event_count = 0;
@@ -80,12 +76,8 @@ void publish_action(BleHidActionType type, int value = 0) {
 
 void reset_semantic_state() {
     taskENTER_CRITICAL(&g_semantic_lock);
-    g_sit_pressed = false;
-    g_stand_pressed = false;
-    g_sit_press_tick = 0;
-    g_stand_press_tick = 0;
     g_forget_bond_button.reset();
-    g_calibration_button.reset();
+    g_preset_buttons.reset();
     g_dial_direction = 0;
     g_dial_event_count = 0;
     g_dial_last_tick = 0;
@@ -228,9 +220,7 @@ void configure_security() {
         ESP_BLE_SM_SET_RSP_KEY, &response_keys, sizeof(response_keys)));
 }
 
-void log_button_release(const char* name, TickType_t pressed_at,
-                        TickType_t released_at) {
-    const TickType_t duration = released_at - pressed_at;
+void log_button_release(const char* name, TickType_t duration) {
     if (duration >= kLongPressThreshold) {
         ESP_LOGW(kTag, "ACTION SAVE_%s (held %lu ms)", name,
                  static_cast<unsigned long>(duration * portTICK_PERIOD_MS));
@@ -301,46 +291,43 @@ void interpret_consumer_control(const std::uint8_t* bytes,
         return;
     }
     if (usage == 0x00E2) {
-        bool new_press = false;
-        taskENTER_CRITICAL(&g_semantic_lock);
-        new_press =
-            g_calibration_button.press(static_cast<std::uint32_t>(now));
-        taskEXIT_CRITICAL(&g_semantic_lock);
-        if (new_press) {
-            publish_action(BleHidActionType::kUserActivity);
-            ESP_LOGW(kTag,
-                     "ACTION STOP (dial press); hold 10 s for calibration");
-            publish_action(BleHidActionType::kStop);
-        }
+        publish_action(BleHidActionType::kUserActivity);
+        ESP_LOGW(kTag, "ACTION STOP (dial press)");
+        publish_action(BleHidActionType::kStop);
         return;
     }
 
     if (usage == 0x00B6) {
-        bool new_press = false;
+        smart_desk::PresetPressResult result;
         taskENTER_CRITICAL(&g_semantic_lock);
-        if (!g_sit_pressed) {
-            g_sit_pressed = true;
-            g_sit_press_tick = now;
-            new_press = true;
-        }
+        result = g_preset_buttons.press(
+            smart_desk::PresetButton::kSit, static_cast<std::uint32_t>(now));
         taskEXIT_CRITICAL(&g_semantic_lock);
-        if (new_press) {
+        if (result.new_press) {
             publish_action(BleHidActionType::kUserActivity);
+        }
+        if (result.chord_started) {
+            ESP_LOGW(kTag,
+                     "ACTION STOP (SIT+STAND); hold both 10 s for calibration");
+            publish_action(BleHidActionType::kStop);
         }
         ESP_LOGI(kTag, "SIT pressed");
         return;
     }
     if (usage == 0x00B5) {
-        bool new_press = false;
+        smart_desk::PresetPressResult result;
         taskENTER_CRITICAL(&g_semantic_lock);
-        if (!g_stand_pressed) {
-            g_stand_pressed = true;
-            g_stand_press_tick = now;
-            new_press = true;
-        }
+        result = g_preset_buttons.press(
+            smart_desk::PresetButton::kStand,
+            static_cast<std::uint32_t>(now));
         taskEXIT_CRITICAL(&g_semantic_lock);
-        if (new_press) {
+        if (result.new_press) {
             publish_action(BleHidActionType::kUserActivity);
+        }
+        if (result.chord_started) {
+            ESP_LOGW(kTag,
+                     "ACTION STOP (SIT+STAND); hold both 10 s for calibration");
+            publish_action(BleHidActionType::kStop);
         }
         ESP_LOGI(kTag, "STAND pressed");
         return;
@@ -363,40 +350,27 @@ void interpret_consumer_control(const std::uint8_t* bytes,
         return;
     }
 
-    bool release_sit = false;
-    bool release_stand = false;
-    TickType_t sit_pressed_at = 0;
-    TickType_t stand_pressed_at = 0;
     bool forget_bond = false;
-    bool start_calibration = false;
+    smart_desk::PresetReleaseResult preset_release;
     taskENTER_CRITICAL(&g_semantic_lock);
-    if (g_sit_pressed) {
-        release_sit = true;
-        sit_pressed_at = g_sit_press_tick;
-        g_sit_pressed = false;
-    }
-    if (g_stand_pressed) {
-        release_stand = true;
-        stand_pressed_at = g_stand_press_tick;
-        g_stand_pressed = false;
-    }
+    preset_release =
+        g_preset_buttons.release(static_cast<std::uint32_t>(now));
     forget_bond =
         g_forget_bond_button.release(static_cast<std::uint32_t>(now));
-    start_calibration =
-        g_calibration_button.release(static_cast<std::uint32_t>(now));
     taskEXIT_CRITICAL(&g_semantic_lock);
 
-    if (release_sit) {
-        log_button_release("SIT", sit_pressed_at, now);
+    if (preset_release.sit_pressed && !preset_release.suppress_presets) {
+        log_button_release("SIT", preset_release.sit_duration);
     }
-    if (release_stand) {
-        log_button_release("STAND", stand_pressed_at, now);
+    if (preset_release.stand_pressed && !preset_release.suppress_presets) {
+        log_button_release("STAND", preset_release.stand_duration);
     }
     if (forget_bond) {
         queue_forget_current_bond();
     }
-    if (start_calibration) {
-        ESP_LOGW(kTag, "ACTION START_CALIBRATION (dial held 10 s)");
+    if (preset_release.start_calibration) {
+        ESP_LOGW(kTag,
+                 "ACTION START_CALIBRATION (SIT+STAND held 10 s)");
         publish_action(BleHidActionType::kStartCalibration);
     }
 }
@@ -414,7 +388,7 @@ void semantic_timer_task(void*) {
         forget_bond =
             g_forget_bond_button.poll(static_cast<std::uint32_t>(now));
         start_calibration =
-            g_calibration_button.poll(static_cast<std::uint32_t>(now));
+            g_preset_buttons.poll(static_cast<std::uint32_t>(now));
         if (g_dial_cancelled_until_quiet &&
             now - g_dial_last_tick >= kDialBurstQuietTime) {
             g_dial_cancelled_until_quiet = false;
@@ -432,7 +406,8 @@ void semantic_timer_task(void*) {
             queue_forget_current_bond();
         }
         if (start_calibration) {
-            ESP_LOGW(kTag, "ACTION START_CALIBRATION (dial held 10 s)");
+            ESP_LOGW(kTag,
+                     "ACTION START_CALIBRATION (SIT+STAND held 10 s)");
             publish_action(BleHidActionType::kStartCalibration);
         }
         process_forget_bond_request();
