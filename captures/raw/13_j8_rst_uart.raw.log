@@ -1,0 +1,160 @@
+Added environment variable ESP_IDF_VERSION = 6.1
+Added environment variable IDF_VERSION = 6.1.0
+Added environment variable IDF_TOOLS_PATH = /Users/USER/.espressif/tools
+Added environment variable IDF_COMPONENT_LOCAL_STORAGE_URL = file:///Users/USER/.espressif/tools
+Added environment variable IDF_PATH = /Users/USER/.espressif/v6.1/esp-idf
+Added environment variable ESP_ROM_ELF_DIR = /Users/USER/.espressif/tools/esp-rom-elfs/20241011/
+Added environment variable OPENOCD_SCRIPTS = /Users/USER/.espressif/tools/openocd-esp32/v0.12.0-esp32-20260703/openocd-esp32/share/openocd/scripts
+Added environment variable IDF_PYTHON_ENV_PATH = /Users/USER/.espressif/tools/python/v6.1/venv
+Added environment variable ESP_CLANG_LIBS_PATH = /Users/USER/.espressif/tools/esp-clang-libs/esp-21.1.3_20260408/esp-clang/lib
+Added proper directory to PATH
+Activated virtual environment at /Users/USER/.espressif/tools/python/v6.1/venv
+Environment setup complete for the current shell session.
+These changes will be lost when you close this terminal.
+You are now using IDF version 6.1.0.
+eim select v6.1
+Executing action: monitor
+Running idf_monitor in directory /Users/USER/DEV/smart_desk/firmware
+Executing "/Users/USER/.espressif/tools/python/v6.1/venv/bin/python /Users/USER/.espressif/v6.1/esp-idf/tools/idf_monitor.py -p /dev/cu.usbmodemXXXX -b 115200 --toolchain-prefix xtensa-esp32s3-elf- --target esp32s3 --revision 0 /Users/USER/DEV/smart_desk/firmware/build/smart_desk.elf /Users/USER/DEV/smart_desk/firmware/build/bootloader/bootloader.elf -m '/Users/USER/.espressif/tools/python/v6.1/venv/bin/python' '/Users/USER/.espressif/v6.1/esp-idf/tools/idf.py' '-B'"...
+--- esp-idf-monitor 1.10.0 on /dev/cu.usbmodemXXXX 115200
+--- Quit: Ctrl+] | Menu: Ctrl+T | Help: Ctrl+T followed by Ctrl+H
+ESP-ROM:esp32s3-20210327
+Build:Mar 27 2021
+rst:0x1 (POWERON),boot:0x8 (SPI_FAST_FLASH_BOOT)
+SPIWP:0xee
+mode:DIO, clock div:1
+load:0x3fce2820,len:0x14f0
+load:0x403c8700,len:0xde4
+--- 0x403c8700: _stext at ??:?
+load:0x403cb700,len:0x2f58
+entry 0x403c8904
+--- 0x403c8904: call_start_cpu0 at /Users/USER/.espressif/v6.1/esp-idf/components/bootloader/subproject/main/bootloader_start.c:27
+[0;32mI (24) boot: ESP-IDF v6.1 2nd stage bootloader[0m
+[0;32mI (25) boot: compile time Sep 14 2026 19:41:53[0m
+[0;32mI (25) boot: Multicore bootloader[0m
+[0;32mI (25) boot: chip revision: v0.2[0m
+[0;32mI (27) boot: efuse block revision: v1.4[0m
+[0;32mI (31) boot.esp32s3: Boot SPI Speed : 80MHz[0m
+[0;32mI (35) boot.esp32s3: SPI Mode       : DIO[0m
+[0;32mI (39) boot.esp32s3: SPI Flash Size : 16MB[0m
+[0;32mI (43) boot: Enabling RNG early entropy source...[0m
+[0;32mI (47) boot: Partition Table:[0m
+[0;32mI (50) boot: ## Label            Usage          Type ST Offset   Length[0m
+[0;32mI (56) boot:  0 nvs              WiFi data        01 02 00009000 00006000[0m
+[0;32mI (62) boot:  1 phy_init         RF data          01 01 0000f000 00001000[0m
+[0;32mI (69) boot:  2 factory          factory app      00 00 00010000 00100000[0m
+[0;32mI (76) boot: End of partition table[0m
+[0;32mI (79) esp_image: segment 0: paddr=00010020 vaddr=3c020020 size=0aef0h ( 44784) map[0m
+[0;32mI (94) esp_image: segment 1: paddr=0001af18 vaddr=3fc91000 size=0320ch ( 12812) load[0m
+[0;32mI (97) esp_image: segment 2: paddr=0001e12c vaddr=40374000 size=01eech (  7916) load[0m
+[0;32mI (103) esp_image: segment 3: paddr=00020020 vaddr=42000020 size=1574ch ( 87884) map[0m
+[0;32mI (125) esp_image: segment 4: paddr=00035774 vaddr=40375eec size=0b048h ( 45128) load[0m
+[0;32mI (135) esp_image: segment 5: paddr=000407c4 vaddr=50000000 size=00024h (    36) load[0m
+[0;32mI (141) boot: Loaded app from partition at offset 0x10000[0m
+[0;32mI (141) boot: Disabling RNG early entropy source...[0m
+[0;32mI (153) cpu_start: Multicore app[0m
+[0;32mI (161) cpu_start: GPIO 44 and 43 are used as console UART I/O pins[0m
+[0;32mI (162) cpu_start: Pro cpu start user code[0m
+[0;32mI (162) cpu_start: cpu freq: 160000000 Hz[0m
+[0;32mI (164) app_init: Application information:[0m
+[0;32mI (168) app_init: Project name:     smart_desk[0m
+[0;32mI (172) app_init: App version:      v0.1.0-prototype.1-9-g219e804[0m
+[0;32mI (177) app_init: Compile time:     Sep 24 2026 20:59:52[0m
+[0;32mI (183) app_init: ELF file SHA256:  7352a906f...[0m
+[0;32mI (187) app_init: ESP-IDF:          v6.1[0m
+[0;32mI (191) efuse_init: Min chip rev:     v0.0[0m
+[0;32mI (194) efuse_init: Max chip rev:     v0.99 [0m
+[0;32mI (198) efuse_init: Chip rev:         v0.2[0m
+[0;32mI (202) heap_init: Initializing. RAM available for dynamic allocation:[0m
+[0;32mI (209) heap_init: At 3FC94C70 len 00054AA0 (338 KiB): RAM[0m
+[0;32mI (214) heap_init: At 3FCE9710 len 00005724 (21 KiB): RAM[0m
+[0;32mI (219) heap_init: At 3FCF0000 len 00008000 (32 KiB): DRAM[0m
+[0;32mI (224) heap_init: At 600FE000 len 00001FE8 (7 KiB): RTCRAM[0m
+[0;32mI (230) spi_flash: detected chip: boya[0m
+[0;32mI (233) spi_flash: flash io: dio[0m
+[0;32mI (236) sleep_gpio: Configure to isolate all GPIO pins in sleep state[0m
+[0;32mI (242) sleep_gpio: Enable automatic switching of GPIO sleep configuration[0m
+[0;32mI (249) main_task: Started on CPU0[0m
+[0;32mI (279) main_task: Calling app_main()[0m
+[0;32mI (279) smart_desk: read-only sniffer; GPIO17/GPIO18 are RX inputs[0m
+[0;32mI (279) main_task: Returned from app_main()[0m
+[0;32mI (33359) desk.panel: command=IDLE code=0x00 status=0x01[0m
+[0;32mI (33789) desk.controller: 55 aa 08 0f 00 0f 01 25[0m
+[0;32mI (33789) desk.controller: valid non-height frame type=0x0F[0m
+[0;32mI (33889) desk.controller: 55 aa 08 02 03 12 01 1e[0m
+[0;32mI (33889) desk.controller: height=78.6 cm flags=0x00 status=0x01[0m
+[0;32mI (34099) desk.controller: 55 aa 08 0f 00 0f 01 25[0m
+[0;32mI (34099) desk.controller: valid non-height frame type=0x0F[0m
+[0;32mI (34209) desk.controller: 55 aa 08 02 03 12 01 1e[0m
+[0;32mI (34209) desk.controller: height=78.6 cm flags=0x00 status=0x01[0m
+[0;32mI (40989) desk.panel: command=DOWN_HOLD code=0x06 status=0x01[0m
+[0;32mI (41619) desk.controller: 55 aa 08 02 03 11 01 1d[0m
+[0;32mI (41619) desk.controller: height=78.5 cm flags=0x00 status=0x01[0m
+[0;32mI (41749) desk.controller: 55 aa 08 02 03 10 01 1c[0m
+[0;32mI (41749) desk.controller: height=78.4 cm flags=0x00 status=0x01[0m
+[0;32mI (41869) desk.controller: 55 aa 08 02 03 0e 01 1a[0m
+[0;32mI (41869) desk.controller: height=78.2 cm flags=0x00 status=0x01[0m
+[0;32mI (41999) desk.controller: 55 aa 08 02 03 0c 01 18[0m
+[0;32mI (41999) desk.controller: height=78.0 cm flags=0x00 status=0x01[0m
+[0;32mI (42129) desk.controller: 55 aa 08 02 03 0a 01 16[0m
+[0;32mI (42129) desk.controller: height=77.8 cm flags=0x00 status=0x01[0m
+[0;32mI (42249) desk.controller: 55 aa 08 02 03 08 01 14[0m
+[0;32mI (42249) desk.controller: height=77.6 cm flags=0x00 status=0x01[0m
+[0;32mI (42369) desk.controller: 55 aa 08 02 03 06 01 12[0m
+[0;32mI (42369) desk.controller: height=77.4 cm flags=0x00 status=0x01[0m
+[0;32mI (42489) desk.controller: 55 aa 08 02 03 03 01 0f[0m
+[0;32mI (42489) desk.controller: height=77.1 cm flags=0x00 status=0x01[0m
+[0;32mI (42619) desk.controller: 55 aa 08 02 03 00 01 0c[0m
+[0;32mI (42619) desk.controller: height=76.8 cm flags=0x00 status=0x01[0m
+[0;32mI (42759) desk.controller: 55 aa 08 02 02 fd 02 08[0m
+[0;32mI (42759) desk.controller: height=76.5 cm flags=0x00 status=0x02[0m
+[0;32mI (42879) desk.controller: 55 aa 08 02 02 f9 02 04[0m
+[0;32mI (42879) desk.controller: height=76.1 cm flags=0x00 status=0x02[0m
+[0;32mI (43009) desk.controller: 55 aa 08 02 02 f6 02 01[0m
+[0;32mI (43009) desk.controller: height=75.8 cm flags=0x00 status=0x02[0m
+[0;32mI (43129) desk.controller: 55 aa 08 02 02 f2 01 fd[0m
+[0;32mI (43129) desk.controller: height=75.4 cm flags=0x00 status=0x01[0m
+[0;32mI (43259) desk.controller: 55 aa 08 02 02 ef 01 fa[0m
+[0;32mI (43259) desk.controller: height=75.1 cm flags=0x00 status=0x01[0m
+[0;32mI (43389) desk.controller: 55 aa 08 02 02 eb 01 f6[0m
+[0;32mI (43389) desk.controller: height=74.7 cm flags=0x00 status=0x01[0m
+[0;32mI (43509) desk.controller: 55 aa 08 02 02 e8 01 f3[0m
+[0;32mI (43509) desk.controller: height=74.4 cm flags=0x00 status=0x01[0m
+[0;32mI (43629) desk.controller: 55 aa 08 02 02 e4 01 ef[0m
+[0;32mI (43629) desk.controller: height=74.0 cm flags=0x00 status=0x01[0m
+[0;32mI (43749) desk.controller: 55 aa 08 02 02 e1 01 ec[0m
+[0;32mI (43749) desk.controller: height=73.7 cm flags=0x00 status=0x01[0m
+[0;32mI (43879) desk.controller: 55 aa 08 02 02 dd 01 e8[0m
+[0;32mI (43879) desk.controller: height=73.3 cm flags=0x00 status=0x01[0m
+[0;32mI (44009) desk.controller: 55 aa 08 02 02 d9 01 e4[0m
+[0;32mI (44009) desk.controller: height=72.9 cm flags=0x00 status=0x01[0m
+[0;32mI (44129) desk.controller: 55 aa 08 02 02 d6 01 e1[0m
+[0;32mI (44129) desk.controller: height=72.6 cm flags=0x00 status=0x01[0m
+[0;32mI (44259) desk.controller: 55 aa 08 02 02 d2 01 dd[0m
+[0;32mI (44259) desk.controller: height=72.2 cm flags=0x00 status=0x01[0m
+[0;32mI (44379) desk.controller: 55 aa 08 02 02 cf 01 da[0m
+[0;32mI (44379) desk.controller: height=71.9 cm flags=0x00 status=0x01[0m
+[0;32mI (44509) desk.controller: 55 aa 08 02 02 cb 01 d6[0m
+[0;32mI (44509) desk.controller: height=71.5 cm flags=0x00 status=0x01[0m
+[0;32mI (44629) desk.controller: 55 aa 08 02 02 c7 01 d2[0m
+[0;32mI (44629) desk.controller: height=71.1 cm flags=0x00 status=0x01[0m
+[0;32mI (44759) desk.controller: 55 aa 08 02 02 c4 01 cf[0m
+[0;32mI (44759) desk.controller: height=70.8 cm flags=0x00 status=0x01[0m
+[0;32mI (44879) desk.controller: 55 aa 08 02 02 c2 01 cd[0m
+[0;32mI (44879) desk.controller: height=70.6 cm flags=0x00 status=0x01[0m
+[0;32mI (44999) desk.controller: 55 aa 08 02 02 c1 01 cc[0m
+[0;32mI (44999) desk.controller: height=70.5 cm flags=0x00 status=0x01[0m
+[0;32mI (45129) desk.controller: 55 aa 08 02 02 bf 01 ca[0m
+[0;32mI (45129) desk.controller: height=70.3 cm flags=0x00 status=0x01[0m
+[0;32mI (45379) desk.controller: 55 aa 08 02 02 be 01 c9[0m
+[0;32mI (45379) desk.controller: height=70.2 cm flags=0x00 status=0x01[0m
+[0;32mI (45509) desk.controller: 55 aa 08 02 02 bc 01 c7[0m
+[0;32mI (45509) desk.controller: height=70.0 cm flags=0x00 status=0x01[0m
+[0;32mI (45969) desk.panel: command=IDLE code=0x00 status=0x01[0m
+[0;32mI (49019) desk.panel: command=DOWN_HOLD code=0x06 status=0x01[0m
+[0;32mI (53409) desk.controller: 55 aa 08 04 00 01 01 0c[0m
+[0;32mI (53409) desk.controller: valid non-height frame type=0x04[0m
+[0;32mI (54249) desk.panel: command=IDLE code=0x00 status=0x01[0m
+[0;32mI (56659) desk.controller: 55 aa 08 02 02 bc 01 c7[0m
+[0;32mI (56659) desk.controller: height=70.0 cm flags=0x00 status=0x01[0m
+

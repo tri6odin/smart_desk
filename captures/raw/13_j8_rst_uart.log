@@ -1,0 +1,83 @@
+# X2DM-SE RST calibration UART capture
+## ESP32-S3 passive sniffer; GPIO17/GPIO18 inputs; 9600/8N1
+## User sequence: 78 cm -> DOWN to 70 cm -> release -> hold DOWN until RST/calibration -> 70 cm
+
+I (33359) desk.panel: command=IDLE code=0x00 status=0x01
+I (33789) desk.controller: 55 aa 08 0f 00 0f 01 25
+I (33789) desk.controller: valid non-height frame type=0x0F
+I (33889) desk.controller: 55 aa 08 02 03 12 01 1e
+I (33889) desk.controller: height=78.6 cm flags=0x00 status=0x01
+I (34099) desk.controller: 55 aa 08 0f 00 0f 01 25
+I (34099) desk.controller: valid non-height frame type=0x0F
+I (34209) desk.controller: 55 aa 08 02 03 12 01 1e
+I (34209) desk.controller: height=78.6 cm flags=0x00 status=0x01
+I (40989) desk.panel: command=DOWN_HOLD code=0x06 status=0x01
+I (41619) desk.controller: 55 aa 08 02 03 11 01 1d
+I (41619) desk.controller: height=78.5 cm flags=0x00 status=0x01
+I (41749) desk.controller: 55 aa 08 02 03 10 01 1c
+I (41749) desk.controller: height=78.4 cm flags=0x00 status=0x01
+I (41869) desk.controller: 55 aa 08 02 03 0e 01 1a
+I (41869) desk.controller: height=78.2 cm flags=0x00 status=0x01
+I (41999) desk.controller: 55 aa 08 02 03 0c 01 18
+I (41999) desk.controller: height=78.0 cm flags=0x00 status=0x01
+I (42129) desk.controller: 55 aa 08 02 03 0a 01 16
+I (42129) desk.controller: height=77.8 cm flags=0x00 status=0x01
+I (42249) desk.controller: 55 aa 08 02 03 08 01 14
+I (42249) desk.controller: height=77.6 cm flags=0x00 status=0x01
+I (42369) desk.controller: 55 aa 08 02 03 06 01 12
+I (42369) desk.controller: height=77.4 cm flags=0x00 status=0x01
+I (42489) desk.controller: 55 aa 08 02 03 03 01 0f
+I (42489) desk.controller: height=77.1 cm flags=0x00 status=0x01
+I (42619) desk.controller: 55 aa 08 02 03 00 01 0c
+I (42619) desk.controller: height=76.8 cm flags=0x00 status=0x01
+I (42759) desk.controller: 55 aa 08 02 02 fd 02 08
+I (42759) desk.controller: height=76.5 cm flags=0x00 status=0x02
+I (42879) desk.controller: 55 aa 08 02 02 f9 02 04
+I (42879) desk.controller: height=76.1 cm flags=0x00 status=0x02
+I (43009) desk.controller: 55 aa 08 02 02 f6 02 01
+I (43009) desk.controller: height=75.8 cm flags=0x00 status=0x02
+I (43129) desk.controller: 55 aa 08 02 02 f2 01 fd
+I (43129) desk.controller: height=75.4 cm flags=0x00 status=0x01
+I (43259) desk.controller: 55 aa 08 02 02 ef 01 fa
+I (43259) desk.controller: height=75.1 cm flags=0x00 status=0x01
+I (43389) desk.controller: 55 aa 08 02 02 eb 01 f6
+I (43389) desk.controller: height=74.7 cm flags=0x00 status=0x01
+I (43509) desk.controller: 55 aa 08 02 02 e8 01 f3
+I (43509) desk.controller: height=74.4 cm flags=0x00 status=0x01
+I (43629) desk.controller: 55 aa 08 02 02 e4 01 ef
+I (43629) desk.controller: height=74.0 cm flags=0x00 status=0x01
+I (43749) desk.controller: 55 aa 08 02 02 e1 01 ec
+I (43749) desk.controller: height=73.7 cm flags=0x00 status=0x01
+I (43879) desk.controller: 55 aa 08 02 02 dd 01 e8
+I (43879) desk.controller: height=73.3 cm flags=0x00 status=0x01
+I (44009) desk.controller: 55 aa 08 02 02 d9 01 e4
+I (44009) desk.controller: height=72.9 cm flags=0x00 status=0x01
+I (44129) desk.controller: 55 aa 08 02 02 d6 01 e1
+I (44129) desk.controller: height=72.6 cm flags=0x00 status=0x01
+I (44259) desk.controller: 55 aa 08 02 02 d2 01 dd
+I (44259) desk.controller: height=72.2 cm flags=0x00 status=0x01
+I (44379) desk.controller: 55 aa 08 02 02 cf 01 da
+I (44379) desk.controller: height=71.9 cm flags=0x00 status=0x01
+I (44509) desk.controller: 55 aa 08 02 02 cb 01 d6
+I (44509) desk.controller: height=71.5 cm flags=0x00 status=0x01
+I (44629) desk.controller: 55 aa 08 02 02 c7 01 d2
+I (44629) desk.controller: height=71.1 cm flags=0x00 status=0x01
+I (44759) desk.controller: 55 aa 08 02 02 c4 01 cf
+I (44759) desk.controller: height=70.8 cm flags=0x00 status=0x01
+I (44879) desk.controller: 55 aa 08 02 02 c2 01 cd
+I (44879) desk.controller: height=70.6 cm flags=0x00 status=0x01
+I (44999) desk.controller: 55 aa 08 02 02 c1 01 cc
+I (44999) desk.controller: height=70.5 cm flags=0x00 status=0x01
+I (45129) desk.controller: 55 aa 08 02 02 bf 01 ca
+I (45129) desk.controller: height=70.3 cm flags=0x00 status=0x01
+I (45379) desk.controller: 55 aa 08 02 02 be 01 c9
+I (45379) desk.controller: height=70.2 cm flags=0x00 status=0x01
+I (45509) desk.controller: 55 aa 08 02 02 bc 01 c7
+I (45509) desk.controller: height=70.0 cm flags=0x00 status=0x01
+I (45969) desk.panel: command=IDLE code=0x00 status=0x01
+I (49019) desk.panel: command=DOWN_HOLD code=0x06 status=0x01
+I (53409) desk.controller: 55 aa 08 04 00 01 01 0c
+I (53409) desk.controller: valid non-height frame type=0x04
+I (54249) desk.panel: command=IDLE code=0x00 status=0x01
+I (56659) desk.controller: 55 aa 08 02 02 bc 01 c7
+I (56659) desk.controller: height=70.0 cm flags=0x00 status=0x01
