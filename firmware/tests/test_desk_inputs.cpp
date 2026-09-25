@@ -159,6 +159,28 @@ void test_preset_chord_release_handles_threshold_and_early_cancel() {
     CHECK(!detector.poll(50000));
 }
 
+void test_other_input_cancels_preset_and_calibration() {
+    PresetGestureDetector detector(10000);
+    CHECK(!detector.cancel());
+    detector.press(PresetButton::kSit, 100);
+    CHECK(detector.cancel());
+    CHECK(!detector.press(PresetButton::kStand, 200).chord_started);
+    CHECK(!detector.poll(20000));
+    auto release = detector.release(20000);
+    CHECK(release.suppress_presets);
+    CHECK(!release.start_calibration);
+
+    detector.press(PresetButton::kStand, 21000);
+    CHECK(detector.press(PresetButton::kSit, 22000).chord_started);
+    CHECK(detector.cancel());
+    CHECK(!detector.poll(40000));
+    release = detector.release(40000);
+    CHECK(release.suppress_presets);
+    CHECK(!release.start_calibration);
+    CHECK(detector.press(PresetButton::kSit, 41000).new_press);
+    CHECK(!detector.release(41100).suppress_presets);
+}
+
 void test_tracker_separates_known_service_and_unknown_frames() {
     TelemetryTracker tracker;
     tracker.receive(service_frame(0x0F, 0x00, 0x0F, 0x01), 0);
@@ -480,6 +502,7 @@ int main() {
     test_preset_gesture_detector_keeps_single_button_behavior();
     test_preset_chord_fires_once_in_both_press_orders();
     test_preset_chord_release_handles_threshold_and_early_cancel();
+    test_other_input_cancels_preset_and_calibration();
     test_tracker_separates_known_service_and_unknown_frames();
     test_recovery_ignores_height_until_rst_then_unlocks();
     test_any_new_user_activity_cancels_calibration();

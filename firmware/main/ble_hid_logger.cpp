@@ -1,4 +1,5 @@
 #include "ble_hid_logger.hpp"
+#include "ble_bonds.hpp"
 
 #include <array>
 #include <atomic>
@@ -27,7 +28,6 @@ constexpr EventBits_t kOpenFinished = BIT2;
 constexpr EventBits_t kDisconnected = BIT3;
 constexpr EventBits_t kPrivacyReady = BIT4;
 constexpr std::uint32_t kScanSeconds = 10;
-constexpr std::size_t kMaxBondedDevices = 8;
 // The D100H can pause for roughly 270 ms between the first event and the
 // accelerated repeats of one physical flick.  A shorter window split one
 // measured flick into +1 cm and +3 cm actions, so wait for 400 ms of actual
@@ -44,9 +44,6 @@ std::uint8_t g_candidate_address_type = 0;
 std::atomic<bool> g_have_candidate{false};
 std::atomic<bool> g_connected{false};
 std::atomic<bool> g_open_pending{false};
-std::array<esp_ble_bond_dev_t, kMaxBondedDevices> g_bonded_devices{};
-std::size_t g_bonded_device_count = 0;
-portMUX_TYPE g_bonds_lock = portMUX_INITIALIZER_UNLOCKED;
 bool g_publish_delayed_dial_delta = true;
 
 portMUX_TYPE g_semantic_lock = portMUX_INITIALIZER_UNLOCKED;
@@ -60,12 +57,6 @@ TickType_t g_dial_last_tick = 0;
 bool g_dial_cancelled_until_quiet = false;
 BleHidActionCallback g_action_callback = nullptr;
 void* g_action_callback_context = nullptr;
-
-portMUX_TYPE g_connection_lock = portMUX_INITIALIZER_UNLOCKED;
-std::array<std::uint8_t, ESP_BD_ADDR_LEN> g_connected_address{};
-bool g_connected_address_valid = false;
-std::array<std::uint8_t, ESP_BD_ADDR_LEN> g_forget_bond_address{};
-bool g_forget_bond_requested = false;
 
 void publish_action(BleHidActionType type, int value = 0) {
     if (g_action_callback != nullptr) {
@@ -102,103 +93,12 @@ void format_address(const std::uint8_t* address, char* output,
 }
 
 void queue_forget_current_bond() {
-    bool queued = false;
-    portENTER_CRITICAL(&g_connection_lock);
-    if (g_connected_address_valid && !g_forget_bond_requested) {
-        g_forget_bond_address = g_connected_address;
-        g_forget_bond_requested = true;
-        queued = true;
-    }
-    portEXIT_CRITICAL(&g_connection_lock);
-
-    if (queued) {
+    if (ble_bonds::queue_forget_connected()) {
         ESP_LOGW(kTag, "ACTION STOP; forgetting current D100H bond");
         publish_action(BleHidActionType::kStop);
     } else {
         ESP_LOGW(kTag, "forget bond ignored: no connected D100H");
     }
-}
-
-void process_forget_bond_request() {
-    std::array<std::uint8_t, ESP_BD_ADDR_LEN> address{};
-    bool requested = false;
-    portENTER_CRITICAL(&g_connection_lock);
-    if (g_forget_bond_requested) {
-        address = g_forget_bond_address;
-        g_forget_bond_requested = false;
-        requested = true;
-    }
-    portEXIT_CRITICAL(&g_connection_lock);
-    if (!requested) {
-        return;
-    }
-
-    char address_text[18] = {};
-    format_address(address.data(), address_text, sizeof(address_text));
-    const esp_err_t result = esp_ble_remove_bond_device(address.data());
-    if (result == ESP_OK) {
-        ESP_LOGW(kTag, "removing bond %s; scan resumes after disconnect",
-                 address_text);
-    } else {
-        ESP_LOGE(kTag, "could not remove bond %s: %s", address_text,
-                 esp_err_to_name(result));
-    }
-}
-
-void refresh_bonded_devices() {
-    std::array<esp_ble_bond_dev_t, kMaxBondedDevices> devices{};
-    int count = esp_ble_get_bond_device_num();
-    if (count < 0) {
-        ESP_LOGE(kTag, "could not read BLE bond count");
-        return;
-    }
-    if (count > static_cast<int>(g_bonded_devices.size())) {
-        count = static_cast<int>(g_bonded_devices.size());
-    }
-    if (count != 0) {
-        int requested = count;
-        const esp_err_t result = esp_ble_get_bond_device_list(
-            &requested, devices.data());
-        if (result != ESP_OK) {
-            ESP_LOGE(kTag, "could not read BLE bonds: %s",
-                     esp_err_to_name(result));
-            return;
-        }
-        count = requested;
-    }
-    // GAP and HID callbacks can run on different tasks. Publish the array and
-    // its length together; no BLE API or logging runs under the spinlock.
-    portENTER_CRITICAL(&g_bonds_lock);
-    g_bonded_devices = devices;
-    g_bonded_device_count = static_cast<std::size_t>(count);
-    portEXIT_CRITICAL(&g_bonds_lock);
-    ESP_LOGI(kTag, "stored BLE bonds=%d", count);
-    for (int index = 0; index < count; ++index) {
-        char text[18] = {};
-        const auto& bond = devices[static_cast<std::size_t>(index)];
-        format_address(bond.bd_addr, text, sizeof(text));
-        ESP_LOGI(kTag, "bond[%d]=%s type=%u keys=0x%02x", index, text,
-                 static_cast<unsigned>(bond.bd_addr_type),
-                 static_cast<unsigned>(bond.bond_key.key_mask));
-    }
-}
-
-bool matches_bonded_address(const std::uint8_t* address) {
-    portENTER_CRITICAL(&g_bonds_lock);
-    const std::size_t count = g_bonded_device_count;
-    bool matched = false;
-    for (std::size_t index = 0; index < count; ++index) {
-        const auto& bond = g_bonded_devices[index];
-        if (std::memcmp(address, bond.bd_addr, ESP_BD_ADDR_LEN) == 0 ||
-            ((bond.bond_key.key_mask & ESP_BLE_ID_KEY_MASK) != 0 &&
-             std::memcmp(address, bond.bond_key.pid_key.static_addr,
-                         ESP_BD_ADDR_LEN) == 0)) {
-            matched = true;
-            break;
-        }
-    }
-    portEXIT_CRITICAL(&g_bonds_lock);
-    return matched;
 }
 
 void configure_security() {
@@ -279,6 +179,21 @@ void interpret_consumer_control(const std::uint8_t* bytes,
         static_cast<std::uint16_t>(bytes[0]) |
         (static_cast<std::uint16_t>(bytes[1]) << 8);
     const TickType_t now = xTaskGetTickCount();
+
+    // A dial or unrelated button while a preset is pending cancels the whole
+    // gesture. Do not let that report move the desk or start BLE unpairing.
+    if (usage != 0 && usage != 0x00B6 && usage != 0x00B5) {
+        bool cancelled = false;
+        taskENTER_CRITICAL(&g_semantic_lock);
+        cancelled = g_preset_buttons.cancel();
+        taskEXIT_CRITICAL(&g_semantic_lock);
+        if (cancelled) {
+            ESP_LOGW(kTag, "ACTION STOP (preset gesture interrupted)");
+            publish_action(BleHidActionType::kUserActivity);
+            publish_action(BleHidActionType::kStop);
+            return;
+        }
+    }
 
     if (usage == 0x00E9) {
         publish_action(BleHidActionType::kUserActivity);
@@ -410,7 +325,7 @@ void semantic_timer_task(void*) {
                      "ACTION START_CALIBRATION (SIT+STAND held 10 s)");
             publish_action(BleHidActionType::kStartCalibration);
         }
-        process_forget_bond_request();
+        ble_bonds::process_requests();
 
         if (rearmed_after_reversal) {
             ESP_LOGI(kTag,
@@ -437,16 +352,12 @@ void hid_event(void*, esp_event_base_t, std::int32_t event_id,
             g_open_pending.store(false);
             if (data->open.status == ESP_OK) {
                 g_connected.store(true);
-                refresh_bonded_devices();
+                ble_bonds::refresh();
                 const auto* address = esp_hidh_dev_bda_get(data->open.dev);
                 char address_text[18] = {};
                 if (address != nullptr) {
                     format_address(address, address_text, sizeof(address_text));
-                    portENTER_CRITICAL(&g_connection_lock);
-                    std::memcpy(g_connected_address.data(), address,
-                                g_connected_address.size());
-                    g_connected_address_valid = true;
-                    portEXIT_CRITICAL(&g_connection_lock);
+                    ble_bonds::connected(address);
                 }
                 ESP_LOGW(kTag, "CONNECTED %s name='%s'", address_text,
                          esp_hidh_dev_name_get(data->open.dev));
@@ -499,6 +410,7 @@ void hid_event(void*, esp_event_base_t, std::int32_t event_id,
             publish_action(BleHidActionType::kDisconnected);
             g_connected.store(false);
             g_open_pending.store(false);
+            ble_bonds::disconnected();
             esp_hidh_dev_free(data->close.dev);
             xEventGroupSetBits(g_events, kDisconnected);
             break;
@@ -528,7 +440,7 @@ void inspect_advertisement(esp_ble_gap_cb_param_t::ble_scan_result_evt_param& re
     }
 
     const bool matched_name = is_d100h_name(name);
-    const bool matched_bond = matches_bonded_address(result.bda);
+    const bool matched_bond = ble_bonds::matches(result.bda);
     if ((!matched_name && !matched_bond) || g_connected.load() ||
         g_open_pending.load() || g_have_candidate.load()) {
         return;
@@ -569,7 +481,7 @@ void gap_event(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* data) {
         case ESP_GAP_BLE_AUTH_CMPL_EVT:
             if (data->ble_security.auth_cmpl.success) {
                 ESP_LOGI(kTag, "pairing/authentication successful");
-                refresh_bonded_devices();
+                ble_bonds::authenticated(data->ble_security.auth_cmpl.bd_addr);
             } else {
                 ESP_LOGE(kTag, "pairing failed, reason=0x%02X",
                          data->ble_security.auth_cmpl.fail_reason);
@@ -577,12 +489,13 @@ void gap_event(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* data) {
             break;
         case ESP_GAP_BLE_REMOVE_BOND_DEV_COMPLETE_EVT:
             if (data->remove_bond_dev_cmpl.status == ESP_BT_STATUS_SUCCESS) {
-                ESP_LOGW(kTag, "BLE bond removed; searching for D100H");
+                ESP_LOGW(kTag, "BLE bond removed");
             } else {
                 ESP_LOGE(kTag, "BLE bond removal failed, status=%d",
                          data->remove_bond_dev_cmpl.status);
             }
-            refresh_bonded_devices();
+            ble_bonds::removal_complete(
+                data->remove_bond_dev_cmpl.status == ESP_BT_STATUS_SUCCESS);
             break;
         default:
             break;
@@ -679,7 +592,7 @@ void start_ble_hid_logger(BleHidActionCallback callback,
     };
     ESP_ERROR_CHECK(esp_hidh_init(&hid_config));
     configure_security();
-    refresh_bonded_devices();
+    ble_bonds::refresh();
 
     esp_ble_scan_params_t scan_parameters{
         .scan_type = BLE_SCAN_TYPE_ACTIVE,

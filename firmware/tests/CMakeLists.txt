@@ -51,9 +51,16 @@ target_link_libraries(test_desk_inputs PRIVATE desk_controller)
 target_compile_options(test_desk_inputs PRIVATE -Wall -Wextra -Werror -Wpedantic)
 add_test(NAME desk_inputs COMMAND test_desk_inputs)
 
-set_tests_properties(desk_protocol desk_controller desk_inputs PROPERTIES TIMEOUT 30)
+add_executable(test_ble_bonds test_ble_bonds.cpp ../main/ble_bonds.cpp)
+target_include_directories(test_ble_bonds PRIVATE stubs ../main)
+target_compile_features(test_ble_bonds PRIVATE cxx_std_17)
+target_compile_options(test_ble_bonds PRIVATE -Wall -Wextra -Werror -Wpedantic)
+add_test(NAME ble_bonds COMMAND test_ble_bonds)
+
+set_tests_properties(desk_protocol desk_controller desk_inputs ble_bonds
+    PROPERTIES TIMEOUT 30)
 if(DESK_ENABLE_SANITIZERS)
     # UBSan normally recovers after some errors; CI must fail on the first one.
-    set_tests_properties(desk_protocol desk_controller desk_inputs PROPERTIES
+    set_tests_properties(desk_protocol desk_controller desk_inputs ble_bonds PROPERTIES
         ENVIRONMENT "UBSAN_OPTIONS=halt_on_error=1:print_stacktrace=1")
 endif()

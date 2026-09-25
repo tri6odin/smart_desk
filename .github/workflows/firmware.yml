@@ -1,0 +1,29 @@
+name: Firmware checks
+
+"on":
+  push:
+  pull_request:
+
+jobs:
+  host-tests:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Protocol and controller tests with UBSan
+        run: python3 tools/check_firmware.py --sanitizers undefined
+
+  esp32s3-build:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+      - name: Build production firmware with ESP-IDF 6.1
+        uses: espressif/esp-idf-ci-action@v1
+        with:
+          esp_idf_version: v6.1
+          target: esp32s3
+          path: firmware
+          command: >-
+            idf.py -B build-ci
+            -D SDKCONFIG=sdkconfig.ble-controller
+            -D SDKCONFIG_DEFAULTS='sdkconfig.defaults;sdkconfig.ble-controller.defaults'
+            build

@@ -77,9 +77,9 @@ struct PresetReleaseResult {
     bool start_calibration = false;
 };
 
-// Tracks the two preset buttons and recognizes their simultaneous hold. HID
-// reports both buttons as usages in one Consumer Control stream and sends one
-// zero usage when the active button set is released.
+// Tracks SIT and STAND usages in the D100H Consumer Control report stream.
+// The observed zero usage ends a gesture; reports do not carry a separate
+// release event for each physical button.
 class PresetGestureDetector {
    public:
     explicit PresetGestureDetector(std::uint32_t chord_threshold)
@@ -88,6 +88,10 @@ class PresetGestureDetector {
     PresetPressResult press(PresetButton button, std::uint32_t now);
     bool poll(std::uint32_t now);
     PresetReleaseResult release(std::uint32_t now);
+    // Any other HID action invalidates an unfinished preset gesture. Keep it
+    // suppressed until the zero-usage release so a stale button cannot move
+    // the desk or restart the calibration timer.
+    bool cancel();
     void reset();
 
    private:
@@ -97,6 +101,7 @@ class PresetGestureDetector {
     bool sit_pressed_ = false;
     bool stand_pressed_ = false;
     bool chord_seen_ = false;
+    bool cancelled_ = false;
 };
 
 // One replacement slot, no motion queue. All methods require the same lock

@@ -1,12 +1,13 @@
 set(main_sources "app_main.cpp")
 if(CONFIG_DESK_MODE_BLE_CONTROLLER)
-    set(main_sources "production_main.cpp" "preset_store.cpp")
+    set(main_sources "production_main.cpp" "preset_store.cpp"
+        "runtime_diagnostics.cpp")
 endif()
 list(APPEND main_sources "uart_transport.cpp")
 
 if(CONFIG_DESK_MODE_BLE_HID_LOGGER OR CONFIG_DESK_MODE_BLE_ONE_SHOT_TEST OR
    CONFIG_DESK_MODE_BLE_CALIBRATION OR CONFIG_DESK_MODE_BLE_CONTROLLER)
-    list(APPEND main_sources "ble_hid_logger.cpp")
+    list(APPEND main_sources "ble_hid_logger.cpp" "ble_bonds.cpp")
 endif()
 
 idf_component_register(

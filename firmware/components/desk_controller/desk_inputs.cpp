@@ -47,7 +47,7 @@ PresetPressResult PresetGestureDetector::press(PresetButton button,
         *pressed_at = now;
         result.new_press = true;
     }
-    if (sit_pressed_ && stand_pressed_) {
+    if (sit_pressed_ && stand_pressed_ && !cancelled_) {
         chord_seen_ = true;
         result.chord_started = chord_.press(now);
     }
@@ -71,7 +71,18 @@ PresetReleaseResult PresetGestureDetector::release(std::uint32_t now) {
     sit_pressed_ = false;
     stand_pressed_ = false;
     chord_seen_ = false;
+    cancelled_ = false;
     return result;
+}
+
+bool PresetGestureDetector::cancel() {
+    if (!sit_pressed_ && !stand_pressed_) {
+        return false;
+    }
+    chord_.reset();
+    chord_seen_ = true;
+    cancelled_ = true;
+    return true;
 }
 
 void PresetGestureDetector::reset() {
@@ -81,6 +92,7 @@ void PresetGestureDetector::reset() {
     sit_pressed_ = false;
     stand_pressed_ = false;
     chord_seen_ = false;
+    cancelled_ = false;
 }
 
 TelemetryTracker::TelemetryTracker(ControllerConfig config) : config_(config) {}

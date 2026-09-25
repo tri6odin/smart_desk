@@ -6,6 +6,7 @@
 #include "desk_inputs.hpp"
 #include "desk_recovery.hpp"
 #include "preset_store.hpp"
+#include "runtime_diagnostics.hpp"
 #include "uart_transport.hpp"
 #include "esp_log.h"
 #include "esp_system.h"
@@ -90,6 +91,11 @@ void reader_task(void*) {
             portENTER_CRITICAL(&g_inputs_mux);
             g_telemetry.receive(*frame, now_ms());
             portEXIT_CRITICAL(&g_inputs_mux);
+            if (smart_desk::classify_controller_frame(*frame) ==
+                smart_desk::ControllerFrameKind::kUnknown) {
+                runtime_diagnostics::fault(
+                    runtime_diagnostics::Fault::kUnknownControllerFrame);
+            }
             if (!have_last_frame || *frame != last_frame) {
                 const auto kind = smart_desk::classify_controller_frame(*frame);
                 if (kind == smart_desk::ControllerFrameKind::kReset) {
@@ -115,6 +121,7 @@ bool transmit(smart_desk::Command command) {
     if (written != static_cast<int>(frame.size()) ||
         uart_wait_tx_done(UART_NUM_1, pdMS_TO_TICKS(50)) != ESP_OK) {
         ESP_LOGE("desk.control", "UART TX failed: %d/8 bytes", written);
+        runtime_diagnostics::fault(runtime_diagnostics::Fault::kUartTransmit);
         return false;
     }
     return true;
@@ -174,6 +181,11 @@ void panel_writer_task(void*) {
             g_inputs.set_controller_state(smart_desk::ControlState::kIdle, 0);
             portEXIT_CRITICAL(&g_inputs_mux);
             if (transmit(recovery_output.command)) {
+                runtime_diagnostics::command(
+                    static_cast<std::uint32_t>(recovery_output.command),
+                    static_cast<std::uint32_t>(controller.state()),
+                    static_cast<std::uint32_t>(recovery_output.state),
+                    control_height);
                 g_panel_heartbeat.fetch_add(1);
             } else {
                 portENTER_CRITICAL(&g_inputs_mux);
@@ -231,7 +243,7 @@ void panel_writer_task(void*) {
                 if (!controller.valid_presets(candidate.sit, candidate.stand)) {
                     ESP_LOGE(
                         "desk.control",
-                        "preset save BLOCKED: require 70..120 cm and SIT+10<=STAND");
+                        "preset save BLOCKED: require 72..118 cm and SIT+10<=STAND");
                 } else if (!smart_desk::save_presets(candidate, controller.config())) {
                     ESP_LOGE("desk.control", "preset save failed in NVS");
                 } else if (!controller.set_presets(candidate.sit, candidate.stand)) {
@@ -241,7 +253,7 @@ void panel_writer_task(void*) {
                     presets = candidate;
                     ESP_LOGW("desk.control",
                              "saved SIT=%u.%u STAND=%u.%u cm; limits unchanged at "
-                             "70.0..120.0",
+                             "72.0..118.0",
                              presets.sit / 10, presets.sit % 10, presets.stand / 10,
                              presets.stand % 10);
                 }
@@ -289,6 +301,11 @@ void panel_writer_task(void*) {
         }
 
         if (transmit(controller_output.command)) {
+            runtime_diagnostics::command(
+                static_cast<std::uint32_t>(controller_output.command),
+                static_cast<std::uint32_t>(controller_output.state),
+                static_cast<std::uint32_t>(recovery_output.state),
+                control_height);
             g_panel_heartbeat.fetch_add(1);
         } else {
             // Drop active intent after a transport failure. A stalled writer
@@ -319,6 +336,7 @@ void panel_watchdog_task(void*) {
                  missed_seconds);
         if (missed_seconds >= 3) {
             ESP_LOGE("desk.watchdog", "panel writer stalled; restarting ESP");
+            runtime_diagnostics::fault(runtime_diagnostics::Fault::kWriterStalled);
             esp_restart();
         }
     }
@@ -327,6 +345,7 @@ void panel_watchdog_task(void*) {
 }  // namespace
 
 extern "C" void app_main() {
+    runtime_diagnostics::begin_boot();
     ESP_LOGW("smart_desk", "BLE CONTROLLER; original panel must be disconnected");
     ESP_LOGW("smart_desk", "SIT/STAND from NVS; limits=72..118 cm; no queue");
     ESP_LOGI("smart_desk", "GPIO17=TX; GPIO18=height RX");
