@@ -28,6 +28,8 @@ def run(args, cwd=ROOT):
 def main():
     parser = argparse.ArgumentParser(description=__doc__)
     parser.add_argument("--all-modes", action="store_true", help="build all 8 modes using EIM")
+    parser.add_argument("--fresh-configs", action="store_true",
+                        help="use isolated generated configs/builds for --all-modes")
     parser.add_argument("--sanitizers", metavar="LIST", help="e.g. address,undefined or undefined")
     args = parser.parse_args()
     build = FIRMWARE / ("build-host-sanitized" if args.sanitizers else "build-host")
@@ -46,12 +48,20 @@ def main():
             config = "sdkconfig" + suffix
             output = "build" if not suffix else "build-" + mode
             defaults = "sdkconfig.defaults" + (";" + config + ".defaults" if suffix else "")
-            command = shlex.join(["idf.py", "-B", output, "-D", "SDKCONFIG=" + config,
+            if args.fresh_configs:
+                config = "sdkconfig.check-" + mode
+                output = "build-check-" + mode
+                # This filename belongs to the check runner, never to a user build.
+                (FIRMWARE / config).unlink(missing_ok=True)
+            command = shlex.join(["idf.py", "-B", output, "-D", "IDF_TARGET=esp32s3",
+                                 "-D", "SDKCONFIG=" + config,
                                  "-D", "SDKCONFIG_DEFAULTS=" + defaults, "build"])
             run(["eim", "run", command, "v6.1"], cwd=FIRMWARE)
             expected = "CONFIG_DESK_MODE_" + symbol + "=y"
             if expected not in (FIRMWARE / config).read_text().splitlines():
                 raise RuntimeError(f"{mode}: unexpected effective firmware configuration")
+            if 'CONFIG_IDF_TARGET="esp32s3"' not in (FIRMWARE / config).read_text().splitlines():
+                raise RuntimeError(f"{mode}: unexpected ESP target")
             print(f"{mode}: PASS", flush=True)
 
 

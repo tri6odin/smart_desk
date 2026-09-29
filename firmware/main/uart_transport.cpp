@@ -20,7 +20,11 @@ void configure_uart(uart_port_t uart, int tx_gpio, int rx_gpio) {
         .flags = {},
     };
 
-    ESP_ERROR_CHECK(uart_driver_install(uart, 1024, 0, 0, nullptr, 0));
+    int interrupt_flags = 0;
+#if CONFIG_UART_ISR_IN_IRAM
+    interrupt_flags = ESP_INTR_FLAG_IRAM;
+#endif
+    ESP_ERROR_CHECK(uart_driver_install(uart, 1024, 0, 0, nullptr, interrupt_flags));
     ESP_ERROR_CHECK(uart_param_config(uart, &uart_config));
     ESP_ERROR_CHECK(
         uart_set_pin(uart, tx_gpio, rx_gpio, UART_PIN_NO_CHANGE, UART_PIN_NO_CHANGE));

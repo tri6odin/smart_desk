@@ -66,6 +66,9 @@ public:
     explicit StreamParser(Direction direction);
 
     std::optional<Frame> feed(std::uint8_t byte);
+    // Diagnostic candidate rejected by framing/checksum validation. This
+    // does not change parser resynchronization or controller semantics.
+    std::optional<Frame> take_rejected();
     void reset();
 
 private:
@@ -74,6 +77,7 @@ private:
     Direction direction_;
     Frame buffer_{};
     std::size_t used_{0};
+    std::optional<Frame> rejected_;
 };
 
 }  // namespace smart_desk

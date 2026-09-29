@@ -1,0 +1,7 @@
+# Existing NVS/PHY/app offsets and sizes are preserved. Normal flashing must
+# not include an image for desk_log, so old records survive firmware updates.
+# Name,      Type, SubType, Offset,   Size,     Flags
+nvs,         data, nvs,     0x9000,   0x6000,
+phy_init,    data, phy,     0xf000,   0x1000,
+factory,     app,  factory, 0x10000,  0x177000,
+desk_log,    data, 0x40,    0x200000, 0x200000,

@@ -6,6 +6,7 @@
 #include "desk_inputs.hpp"
 #include "desk_recovery.hpp"
 #include "preset_store.hpp"
+#include "persistent_journal.hpp"
 #include "runtime_diagnostics.hpp"
 #include "uart_transport.hpp"
 #include "esp_log.h"
@@ -85,10 +86,16 @@ void reader_task(void*) {
             uart_read_bytes(UART_NUM_1, bytes.data(), bytes.size(), pdMS_TO_TICKS(100));
         for (int index = 0; index < received; ++index) {
             const auto frame = parser.feed(bytes[static_cast<std::size_t>(index)]);
+            if (const auto rejected = parser.take_rejected()) {
+                persistent_journal::receive(*rejected, true);
+            }
             if (!frame) {
                 continue;
             }
             portENTER_CRITICAL(&g_inputs_mux);
+            // Capture before publishing telemetry to the writer, so the
+            // fault's RX record precedes its safety TX in the journal.
+            persistent_journal::receive(*frame);
             g_telemetry.receive(*frame, now_ms());
             portEXIT_CRITICAL(&g_inputs_mux);
             if (smart_desk::classify_controller_frame(*frame) ==
@@ -115,15 +122,19 @@ void reader_task(void*) {
     }
 }
 
-bool transmit(smart_desk::Command command) {
+bool transmit(smart_desk::Command command,
+              smart_desk::journal::Context context = smart_desk::journal::Context::kNone,
+              bool routine_step_idle = false) {
     const auto frame = smart_desk::make_panel_frame(command);
     const int written = uart_write_bytes(UART_NUM_1, frame.data(), frame.size());
     if (written != static_cast<int>(frame.size()) ||
         uart_wait_tx_done(UART_NUM_1, pdMS_TO_TICKS(50)) != ESP_OK) {
         ESP_LOGE("desk.control", "UART TX failed: %d/8 bytes", written);
         runtime_diagnostics::fault(runtime_diagnostics::Fault::kUartTransmit);
+        persistent_journal::transmit_error(command);
         return false;
     }
+    persistent_journal::transmitted(command, context, routine_step_idle);
     return true;
 }
 
@@ -141,6 +152,7 @@ void panel_writer_task(void*) {
     initial_input.stop_requested = true;
     controller.update(initial_input);
     smart_desk::ControlState logged_state = controller.state();
+    auto preset_context = smart_desk::journal::Context::kNone;
     smart_desk::RecoveryState logged_recovery_state = recovery.state();
     TickType_t last_wake = xTaskGetTickCount();
 
@@ -180,19 +192,26 @@ void panel_writer_task(void*) {
             portENTER_CRITICAL(&g_inputs_mux);
             g_inputs.set_controller_state(smart_desk::ControlState::kIdle, 0);
             portEXIT_CRITICAL(&g_inputs_mux);
-            if (transmit(recovery_output.command)) {
+            const auto context = recovery_output.state == smart_desk::RecoveryState::kCalibrating
+                ? smart_desk::journal::Context::kCalibration
+                : smart_desk::journal::Context::kNone;
+            if (transmit(recovery_output.command, context)) {
                 runtime_diagnostics::command(
                     static_cast<std::uint32_t>(recovery_output.command),
                     static_cast<std::uint32_t>(controller.state()),
                     static_cast<std::uint32_t>(recovery_output.state),
                     control_height);
                 g_panel_heartbeat.fetch_add(1);
+                if (recovery_output.command == smart_desk::Command::kIdle) {
+                    persistent_journal::maintain_after_idle();
+                }
             } else {
                 portENTER_CRITICAL(&g_inputs_mux);
                 g_inputs.stop();
                 g_inputs.user_activity();
                 portEXIT_CRITICAL(&g_inputs_mux);
             }
+            persistent_journal::cycle_completed(telemetry.unknown_frame_sequence);
         }
 
         if (recovery_output.reason != smart_desk::RecoveryReason::kNone ||
@@ -300,13 +319,32 @@ void panel_writer_task(void*) {
             logged_state = controller_output.state;
         }
 
-        if (transmit(controller_output.command)) {
+        auto journal_context = smart_desk::journal::Context::kNone;
+        if (controller_output.state == smart_desk::ControlState::kManualStep ||
+            controller_output.state == smart_desk::ControlState::kManualHold) {
+            journal_context = smart_desk::journal::Context::kDial;
+        } else if (controller_output.state == smart_desk::ControlState::kPresetHold) {
+            if (motion_request == smart_desk::ControlRequest::kGoSit) {
+                preset_context = smart_desk::journal::Context::kSit;
+            } else if (motion_request == smart_desk::ControlRequest::kGoStand) {
+                preset_context = smart_desk::journal::Context::kStand;
+            }
+            journal_context = preset_context;
+        }
+        const bool routine_step_idle =
+            controller_output.state == smart_desk::ControlState::kManualStep &&
+            controller_output.reason == smart_desk::TransitionReason::kNone;
+        if (transmit(controller_output.command, journal_context, routine_step_idle)) {
             runtime_diagnostics::command(
                 static_cast<std::uint32_t>(controller_output.command),
                 static_cast<std::uint32_t>(controller_output.state),
                 static_cast<std::uint32_t>(recovery_output.state),
                 control_height);
             g_panel_heartbeat.fetch_add(1);
+            if (controller_output.command == smart_desk::Command::kIdle &&
+                controller_output.state == smart_desk::ControlState::kIdle) {
+                persistent_journal::maintain_after_idle();
+            }
         } else {
             // Drop active intent after a transport failure. A stalled writer
             // remains covered by the independent heartbeat supervisor.
@@ -314,6 +352,7 @@ void panel_writer_task(void*) {
             g_inputs.stop();
             portEXIT_CRITICAL(&g_inputs_mux);
         }
+        persistent_journal::cycle_completed(telemetry.unknown_frame_sequence);
         xTaskDelayUntil(&last_wake, kPanelPeriod);
     }
 }
@@ -352,6 +391,9 @@ extern "C" void app_main() {
 
     configure_uart(UART_NUM_1, kTxGpio, kRxGpio);
     ESP_ERROR_CHECK(transmit(smart_desk::Command::kIdle) ? ESP_OK : ESP_FAIL);
+    persistent_journal::begin();
+    persistent_journal::transmitted(smart_desk::Command::kIdle);
+    persistent_journal::start_worker();
     // BLE initialization owns NVS initialization. Start the writer afterwards
     // so its persisted preset read cannot race nvs_flash_init().
     start_ble_hid_logger(ble_motion_action, nullptr, false);

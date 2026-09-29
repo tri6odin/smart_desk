@@ -8,6 +8,10 @@
 __pycache__/
 *.py[cod]
 
+# Captures produced by tools/desk_log.py (explicitly save evidence in captures/).
+desk-log-*.bin
+desk-log-*.txt
+
 # ESP-IDF and host build products
 firmware/build*/
 

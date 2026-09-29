@@ -120,6 +120,13 @@ StreamParser::StreamParser(Direction direction) : direction_(direction) {}
 
 void StreamParser::reset() {
     used_ = 0;
+    rejected_.reset();
+}
+
+std::optional<Frame> StreamParser::take_rejected() {
+    const auto result = rejected_;
+    rejected_.reset();
+    return result;
 }
 
 std::optional<Frame> StreamParser::feed(std::uint8_t byte) {
@@ -156,6 +163,7 @@ std::optional<Frame> StreamParser::feed(std::uint8_t byte) {
         return result;
     }
 
+    rejected_ = buffer_;
     resync_after_invalid_frame();
     return std::nullopt;
 }
