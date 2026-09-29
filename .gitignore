@@ -20,3 +20,6 @@ firmware/sdkconfig
 firmware/sdkconfig.*
 !firmware/sdkconfig.defaults
 !firmware/sdkconfig.*.defaults
+
+# Machine-specific ESP-IDF Installation Manager settings
+/eim_config.toml

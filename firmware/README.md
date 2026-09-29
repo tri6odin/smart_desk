@@ -3,7 +3,8 @@
 ESP-IDF **6.1**, target **esp32s3**, модуль **N16R8**. Команды ниже используют
 установленный ESP-IDF Installation Manager (`eim`) с окружением `v6.1`.
 Host-тестам нужны Python 3, CMake и C++-компилятор; чтению ESP — пакет esptool
-из окружения IDF.
+из окружения IDF. Локальный `eim_config.toml` создаётся установщиком
+для конкретного компьютера и не хранится в Git.
 
 ## Production
 
