@@ -1,13 +1,28 @@
 # Архитектура прошивки
 
-```text
-D100H → BLE HID → InputMailbox ───────┐
-                                    ↓
-Стол → UART RX → parser → TelemetryTracker → recovery / controller → UART TX → стол
-                    ↓                                      ↓
-                 журнал RX                              журнал TX
-                    └──────── очередь → flash ─────────────┘
+```mermaid
+flowchart TD
+    Remote["Ulanzi D100H"] --> BLE["BLE HID и жесты кнопок"]
+    BLE --> Input["InputMailbox"]
+    Desk["Силовая плата стола"] --> RX["UART RX · GPIO18"]
+    RX --> Parser["Парсер кадров и checksum"]
+    Parser --> Telemetry["TelemetryTracker"]
+    Input --> Snapshot["Согласованный снимок ввода и высоты"]
+    Telemetry --> Snapshot
+    subgraph Writer["UART writer · цикл 100 мс"]
+        Snapshot --> Recovery["Recovery · приоритет над движением"]
+        Recovery -->|"Обычное управление разрешено"| Motion["DeskController"]
+        Recovery -->|"Блокировка или калибровка"| TX["UART TX · GPIO17"]
+        Motion --> TX
+    end
+    TX --> Desk
+    Parser -.->|"RX и INVALID"| Journal["Постоянный журнал"]
+    TX -.->|"Завершённая TX или TX_ERROR"| Journal
 ```
+
+Сплошные стрелки показывают путь управления, пунктирные — диагностику.
+Журнал не принимает решений о движении.
+
 
 ## Границы модулей
 
@@ -30,6 +45,30 @@ CMake выбирает одну точку входа. Чистые компон
 ESP-адаптеры требуют сборки и аппаратной проверки.
 
 ## Обычное движение
+
+```mermaid
+stateDiagram-v2
+    [*] --> IDLE
+    IDLE --> DIAL_CLASSIFY: Новый допустимый жест
+    IDLE --> PRESET_HOLD: SIT или STAND вне допуска цели
+    DIAL_CLASSIFY --> MANUAL_STEP: 300 мс, HOLD не выбран
+    DIAL_CLASSIFY --> MANUAL_HOLD: Третий report, HOLD разрешён
+    DIAL_CLASSIFY --> IDLE: Отмена или непригодный ввод
+    DIAL_CLASSIFY --> SETTLING: Кнопка пресета
+    MANUAL_STEP --> IDLE: Шаг завершён, высота стабильна
+    MANUAL_STEP --> SETTLING: STOP, реверс или защита
+    MANUAL_HOLD --> SETTLING: Тишина 350 мс, предел, STOP или защита
+    PRESET_HOLD --> SETTLING: Точка торможения, новый ввод или защита
+    SETTLING --> IDLE: Стабилизация или тайм-аут
+    SETTLING --> DIAL_CLASSIFY: Новый жест после тишины и стабильной высоты
+```
+
+Схема показывает основные переходы. Если в одном снимке уже есть три reports,
+классификация может сразу перейти в HOLD без отдельного цикла ожидания.
+Готовый к работе `SETTLING` также может принять новый пресет через `IDLE`
+в том же цикле. Защита включает проверку телеметрии, прогресса и тайм-аутов.
+Вмешательство recovery показано отдельно ниже.
+
 
 Состояния: `IDLE`, `DIAL_CLASSIFY`, `MANUAL_STEP`, `MANUAL_HOLD`,
 `PRESET_HOLD`, `SETTLING`. На каждом цикле writer получает согласованный
@@ -56,6 +95,31 @@ ESP-адаптеры требуют сборки и аппаратной про�
 
 ## Восстановление
 
+```mermaid
+stateDiagram-v2
+    [*] --> READY
+    READY --> LOCKED: UNKNOWN
+    READY --> CALIBRATING: SIT + STAND 10 с
+    LOCKED --> CALIBRATING: SIT + STAND 10 с
+    LOCKED --> AWAITING_TELEMETRY: Точный RST
+    CALIBRATING --> CALIBRATING: Высота или UNKNOWN, продолжаем DOWN
+    CALIBRATING --> AWAITING_TELEMETRY: Точный RST, выдаём IDLE
+    CALIBRATING --> LOCKED: Тайм-аут 60 с
+    CALIBRATING --> Cancel: Новое действие пользователя
+    AWAITING_TELEMETRY --> Cancel: Новое действие пользователя
+    state Cancel <<choice>>
+    Cancel --> LOCKED: Ошибка зафиксирована
+    Cancel --> READY: Ошибки не было
+    AWAITING_TELEMETRY --> READY: Три стабильных свежих кадра высоты
+    AWAITING_TELEMETRY --> LOCKED: UNKNOWN или тайм-аут 10 с
+    AWAITING_TELEMETRY --> CALIBRATING: Новый запрос калибровки
+```
+
+`LOCKED` и `AWAITING_TELEMETRY` продолжают отправлять IDLE.
+Запрос калибровки имеет приоритет и запускает новый отсчёт её тайм-аута.
+Обычная высота в `LOCKED` не снимает блокировку.
+
+
 | Состояние | Выход и условие перехода |
 |---|---|
 | `READY` | Работает обычный контроллер; UNKNOWN переводит в LOCKED |
@@ -68,6 +132,28 @@ Recovery имеет приоритет над обычным движением 
 в RAM; журнал хранит историю, но не восстанавливает блокировку при загрузке.
 
 ## Хранение и отказоустойчивость
+
+```mermaid
+flowchart TD
+    Events["RX / TX / INVALID / TX_ERROR"] --> Dedup["Дедупликация отдельно для RX и TX"]
+    Dedup --> Queue["Очередь RAM · 1024 записи"]
+    Queue --> Worker["Фоновая задача записи"]
+    Worker -->|"Append и проверка чтением"| Flash[("Flash-кольцо · 2 МиБ<br/>до 65 024 записей")]
+    Worker -->|"Нужен непустой сектор"| Erase["Запрос стирания"]
+    Erase --> Writer["UART writer"]
+    Writer -->|"После успешного IDLE<br/>в разрешённом состоянии"| Flash
+    Flash -->|"USB · esptool read-flash"| Dump["Исходный дамп .bin"]
+    Dump --> Decode["tools/desk_log.py"]
+    Decode --> Text["Читаемый .txt и вывод в терминал"]
+```
+
+Стирание не выполняется параллельно запуску HOLD тем же writer.
+Программирование flash остаётся фоновой операцией и может задерживать задачи;
+его влияние на STOP ещё требует измерения. При UNKNOWN новые записи ждут
+обработки соответствующего снимка writer; уже начатая flash-операция не отменяется.
+Очередь в RAM — временный буфер: её незаписанный хвост может пропасть при
+снятии питания. Подробнее — [формат и сохранность журнала](persistent-journal.md).
+
 
 NVS хранит пресеты и BLE bond. Отдельный раздел flash хранит
 [постоянный журнал](persistent-journal.md). RTC-снимок содержит последнее
