@@ -4,7 +4,6 @@
 #include <cstring>
 
 #include "esp_app_desc.h"
-#include "esp_log.h"
 #include "esp_partition.h"
 #include "esp_system.h"
 #include "esp_timer.h"
@@ -15,7 +14,6 @@
 namespace persistent_journal {
 namespace {
 using namespace smart_desk::journal;
-constexpr char kTag[] = "desk.journal";
 Capture g_capture;
 portMUX_TYPE g_queue_lock = portMUX_INITIALIZER_UNLOCKED;
 SemaphoreHandle_t g_store_lock = nullptr;
@@ -79,7 +77,6 @@ void worker(void*) {
         } else if (result == AppendResult::kNeedsSector) {
             g_needs_sector.store(true);
         } else {
-            ESP_LOGE(kTag, "flash write/readback failed; retrying; RAM tail is volatile");
             vTaskDelay(pdMS_TO_TICKS(1000));
         }
     }
@@ -90,12 +87,10 @@ void begin() {
     g_flash.partition = esp_partition_find_first(
         ESP_PARTITION_TYPE_DATA, static_cast<esp_partition_subtype_t>(0x40), "desk_log");
     if (g_flash.partition == nullptr || !g_store.mount()) {
-        ESP_LOGE(kTag, "persistent log unavailable: missing/invalid desk_log partition");
         return;
     }
     g_store_lock = xSemaphoreCreateMutex();
     if (g_store_lock == nullptr) {
-        ESP_LOGE(kTag, "persistent log unavailable: mutex allocation failed");
         return;
     }
     g_enabled = true;
@@ -103,16 +98,11 @@ void begin() {
     std::memcpy(build.data(), esp_app_get_description()->app_elf_sha256, build.size());
     g_capture.begin(g_store.last_boot_id() + 1, g_store.last_sequence(), uptime_ms(),
                     build, static_cast<std::uint8_t>(esp_reset_reason()));
-    ESP_LOGI(kTag, "boot=%lu previous_seq=%lu capacity=%u records; read with tools/desk_log.py",
-             static_cast<unsigned long>(g_store.last_boot_id() + 1),
-             static_cast<unsigned long>(g_store.last_sequence()),
-             static_cast<unsigned>((g_flash.size() / kSectorSize) * kRecordsPerSector));
 }
 
 void start_worker() {
     if (g_enabled && xTaskCreate(worker, "desk_log", 4096, nullptr, 2, nullptr) != pdPASS) {
         g_enabled = false;
-        ESP_LOGE(kTag, "persistent log unavailable: worker allocation failed");
     }
 }
 
@@ -137,6 +127,15 @@ void transmit_error(smart_desk::Command command) {
     portEXIT_CRITICAL(&g_queue_lock);
 }
 
+void presets(std::uint16_t previous_sit, std::uint16_t previous_stand,
+             std::uint16_t sit, std::uint16_t stand,
+             smart_desk::journal::Context context) {
+    if (!g_enabled) return;
+    portENTER_CRITICAL(&g_queue_lock);
+    g_capture.presets(previous_sit, previous_stand, sit, stand, uptime_ms(), context);
+    portEXIT_CRITICAL(&g_queue_lock);
+}
+
 void cycle_completed(std::uint32_t unknown_sequence) {
     if (!g_enabled) return;
     portENTER_CRITICAL(&g_queue_lock);
@@ -152,7 +151,6 @@ void maintain_after_idle() {
     if (g_store.prepare_sector()) g_needs_sector.store(false);
     else {
         retry_after_us = esp_timer_get_time() + 10000000;
-        ESP_LOGE(kTag, "sector preparation failed; retry in 10 s; retaining queued records");
     }
     xSemaphoreGive(g_store_lock);
 }

@@ -18,11 +18,14 @@ class DecoderTests(unittest.TestCase):
             path = Path(directory) / "journal.bin"
             subprocess.run([WRITER, "--fixture", str(path)], check=True)
             journal = desk_log.decode(path.read_bytes())
-            self.assertEqual([e.sequence for e in journal.events], [1, 2, 3, 4])
+            self.assertEqual([e.sequence for e in journal.events], [1, 2, 3, 4, 5, 6, 7])
             self.assertEqual(journal.invalid_records, 1)
             text = desk_log.render(journal, 0, True)
             self.assertIn("UP_HOLD [dial]", text)
             self.assertIn("UNKNOWN 55 AA 08 07 00 02 01 10", text)
+            self.assertIn("PRESETS SIT=80.4 cm STAND=115.0 cm", text)
+            self.assertIn("SAVE_SIT 80.4 -> 82.0 cm", text)
+            self.assertIn("SAVE_STAND 115.0 -> 116.0 cm", text)
             self.assertIn("1193:02:47.", text)  # uptime does not wrap at 2^32 ms
             self.assertNotIn("DIAL_UP_START", text)
             self.assertNotIn("SETTLED", text)
@@ -30,7 +33,7 @@ class DecoderTests(unittest.TestCase):
             result = subprocess.run([sys.executable, str(ROOT / "tools/desk_log.py"),
                                      "--input", str(path), "--all"],
                                     capture_output=True, text=True, check=True)
-            self.assertIn("Stored: 4 records", result.stdout)
+            self.assertIn("Stored: 7 records", result.stdout)
 
     def test_empty_and_invalid_dump(self):
         self.assertEqual(desk_log.decode(b"\xff" * 8192).events, [])

@@ -27,7 +27,7 @@ std::uint32_t crc32(const void* data, std::size_t size) {
 
 void seal(Record& record) { record.crc = crc32(&record, offsetof(Record, crc)); }
 bool valid(const Record& record) {
-    return record.kind >= Kind::kBoot && record.kind <= Kind::kGap &&
+    return record.kind >= Kind::kBoot && record.kind <= Kind::kPresets &&
            record.reserved == 0 &&
            record.crc == crc32(&record, offsetof(Record, crc));
 }
@@ -116,6 +116,22 @@ void Capture::transmitted(Command command, std::uint64_t now, Context context,
 
 void Capture::transmit_error(Command command, std::uint64_t now) {
     if (filter_.transmit_error(command)) enqueue(Kind::kTxError, make_panel_frame(command), now);
+}
+
+void Capture::presets(std::uint16_t previous_sit, std::uint16_t previous_stand,
+                      std::uint16_t sit, std::uint16_t stand, std::uint64_t now,
+                      Context context) {
+    if (context != Context::kNone && context != Context::kSit &&
+        context != Context::kStand) return;
+    if (context != Context::kNone && previous_sit == sit &&
+        previous_stand == stand) return;
+    Frame data{};
+    const std::uint16_t values[]{previous_sit, previous_stand, sit, stand};
+    for (std::size_t i = 0; i < 4; ++i) {
+        data[2 * i] = static_cast<std::uint8_t>(values[i]);
+        data[2 * i + 1] = static_cast<std::uint8_t>(values[i] >> 8);
+    }
+    enqueue(Kind::kPresets, data, now, static_cast<std::uint8_t>(context));
 }
 
 std::optional<Record> Capture::take(std::uint64_t now) {

@@ -2,19 +2,16 @@
 
 #include <algorithm>
 #include <array>
-#include <cstdio>
 #include <cstring>
 #include <memory>
 #include <new>
 
 #include "esp_gap_ble_api.h"
-#include "esp_log.h"
 #include "freertos/FreeRTOS.h"
 
 namespace ble_bonds {
 namespace {
 
-constexpr char kTag[] = "d100h.bonds";
 constexpr std::size_t kCapacity = CONFIG_BT_SMP_MAX_BONDS;
 static_assert(kCapacity > 0);
 std::array<esp_ble_bond_dev_t, kCapacity> g_devices{};
@@ -40,12 +37,6 @@ bool matches_device(const esp_ble_bond_dev_t& device,
             same_address(device.bond_key.pid_key.static_addr, address));
 }
 
-void format_address(const std::uint8_t* address, char* text) {
-    std::snprintf(text, 18, "%02X:%02X:%02X:%02X:%02X:%02X",
-                  address[0], address[1], address[2], address[3], address[4],
-                  address[5]);
-}
-
 }  // namespace
 
 void refresh() {
@@ -54,13 +45,10 @@ void refresh() {
     std::unique_ptr<esp_ble_bond_dev_t[]> devices(
         new (std::nothrow) esp_ble_bond_dev_t[kCapacity]{});
     if (!devices) {
-        ESP_LOGE(kTag, "could not allocate BLE bond snapshot");
         return;
     }
     int count = esp_ble_get_bond_device_num();
     if (count < 0 || count > static_cast<int>(kCapacity)) {
-        ESP_LOGE(kTag, "invalid BLE bond count=%d (capacity=%u)", count,
-                 static_cast<unsigned>(kCapacity));
         return;
     }
     if (count != 0) {
@@ -68,8 +56,6 @@ void refresh() {
         const esp_err_t result = esp_ble_get_bond_device_list(
             &requested, devices.get());
         if (result != ESP_OK || requested < 0 || requested > count) {
-            ESP_LOGE(kTag, "could not read BLE bonds: %s count=%d",
-                     esp_err_to_name(result), requested);
             return;
         }
         count = requested;
@@ -78,15 +64,6 @@ void refresh() {
     std::copy_n(devices.get(), kCapacity, g_devices.begin());
     g_count = static_cast<std::size_t>(count);
     portEXIT_CRITICAL(&g_lock);
-    ESP_LOGI(kTag, "stored BLE bonds=%d", count);
-    for (int index = 0; index < count; ++index) {
-        char text[18] = {};
-        const auto& bond = devices[static_cast<std::size_t>(index)];
-        format_address(bond.bd_addr, text);
-        ESP_LOGI(kTag, "bond[%d]=%s type=%u keys=0x%02x", index, text,
-                 static_cast<unsigned>(bond.bd_addr_type),
-                 static_cast<unsigned>(bond.bond_key.key_mask));
-    }
 }
 
 bool matches(const std::uint8_t* address) {
@@ -119,11 +96,9 @@ void authenticated(const std::uint8_t* address) {
     refresh();
     std::size_t matches = 0;
     std::array<std::uint8_t, ESP_BD_ADDR_LEN> retained{};
-    std::size_t count = 0;
     portENTER_CRITICAL(&g_lock);
     g_retained_valid = false;
     g_prune_requested = false;
-    count = g_count;
     for (std::size_t index = 0; index < g_count; ++index) {
         if (matches_device(g_devices[index], address)) {
             std::memcpy(retained.data(), g_devices[index].bd_addr,
@@ -137,11 +112,6 @@ void authenticated(const std::uint8_t* address) {
         g_prune_requested = g_count > 1;
     }
     portEXIT_CRITICAL(&g_lock);
-    if (matches != 1 && count > 1) {
-        ESP_LOGW(kTag,
-                 "authenticated address matches %u identities; keeping %u bonds",
-                 static_cast<unsigned>(matches), static_cast<unsigned>(count));
-    }
 }
 
 bool queue_forget_connected() {
@@ -161,7 +131,6 @@ bool queue_forget_connected() {
 void process_requests() {
     std::array<std::uint8_t, ESP_BD_ADDR_LEN> address{};
     bool requested = false;
-    bool pruning = false;
     portENTER_CRITICAL(&g_lock);
     if (!g_removal_in_flight) {
         if (g_forget_requested) {
@@ -175,7 +144,6 @@ void process_requests() {
                     std::memcpy(address.data(), g_devices[index].bd_addr,
                                 address.size());
                     requested = true;
-                    pruning = true;
                     break;
                 }
             }
@@ -191,14 +159,8 @@ void process_requests() {
     if (!requested) {
         return;
     }
-    char text[18] = {};
-    format_address(address.data(), text);
     const esp_err_t result = esp_ble_remove_bond_device(address.data());
-    if (result == ESP_OK) {
-        ESP_LOGW(kTag, "%s bond %s", pruning ? "retiring old" : "forgetting", text);
-    } else {
-        ESP_LOGE(kTag, "could not remove bond %s: %s", text,
-                 esp_err_to_name(result));
+    if (result != ESP_OK) {
         portENTER_CRITICAL(&g_lock);
         g_removal_in_flight = false;
         g_prune_requested = false;

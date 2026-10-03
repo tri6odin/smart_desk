@@ -14,7 +14,7 @@ constexpr std::uint32_t kMagic = 0x314A4453;  // SDJ1, little endian
 constexpr std::uint16_t kVersion = 1;
 
 enum class Kind : std::uint8_t {
-    kBoot = 1, kRx, kTx, kRxInvalid, kTxError, kGap,
+    kBoot = 1, kRx, kTx, kRxInvalid, kTxError, kGap, kPresets,
 };
 enum class Context : std::uint8_t {
     kNone = 0, kDial, kSit, kStand, kCalibration,
@@ -80,6 +80,11 @@ public:
     void transmitted(Command command, std::uint64_t now, Context context,
                      bool routine_step_idle);
     void transmit_error(Command command, std::uint64_t now);
+    // Payload: previous SIT/STAND, new SIT/STAND (four little-endian u16).
+    // Context none records the initial NVS snapshot. Saves log only changes.
+    void presets(std::uint16_t previous_sit, std::uint16_t previous_stand,
+                 std::uint16_t sit, std::uint16_t stand, std::uint64_t now,
+                 Context context = Context::kNone);
     void cycle_completed(std::uint32_t unknown_sequence) { handled_ = unknown_sequence; }
     bool safety_pending() const { return unknown_ != handled_; }
     std::optional<Record> take(std::uint64_t now);

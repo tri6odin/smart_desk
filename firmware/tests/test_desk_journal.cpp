@@ -239,6 +239,37 @@ void invalid_capture_preserves_parser() {
     CHECK(!parser.take_rejected());
 }
 
+void preset_changes_survive_mount() {
+    MemoryFlash flash;
+    Store store(flash);
+    CHECK(store.mount());
+    Capture capture;
+    capture.begin(8, 0, 100, {}, 1);
+    capture.presets(804, 1150, 804, 1150, 110);  // initial NVS snapshot
+    capture.presets(804, 1150, 820, 1150, 200, Context::kSit);
+    capture.presets(820, 1150, 820, 1150, 201, Context::kSit);  // no change
+    capture.presets(820, 1150, 820, 1160, 300, Context::kStand);
+    capture.presets(820, 1160, 804, 1160, 400, Context::kSit);  // A -> B -> A
+    capture.presets(804, 1160, 804, 1160, 401, Context::kCalibration);  // invalid source
+    while (auto record = capture.take(500)) {
+        seal(*record);
+        CHECK(store.append(*record) == AppendResult::kWritten);
+    }
+    Store remounted(flash);
+    CHECK(remounted.mount());
+    CHECK(remounted.last_sequence() == 5);
+    CHECK(remounted.last_boot_id() == 8);
+    const auto saved = records(flash);
+    CHECK(saved.size() == 5);
+    CHECK(saved[1].kind == Kind::kPresets && saved[1].context == 0);
+    const Frame sit_change{0x24, 0x03, 0x7e, 0x04, 0x34, 0x03, 0x7e, 0x04};
+    CHECK(saved[2].data == sit_change);
+    CHECK(saved[2].context == static_cast<unsigned>(Context::kSit));
+    CHECK(saved[2].uptime_ms == 200);
+    CHECK(saved[3].context == static_cast<unsigned>(Context::kStand));
+    CHECK(saved[4].uptime_ms == 400);
+}
+
 void fixture(const char* path) {
     MemoryFlash flash;
     Store store(flash);
@@ -262,9 +293,25 @@ void fixture(const char* path) {
     record.data = make_panel_frame(Command::kIdle);
     seal(record);
     CHECK(store.append(record) == AppendResult::kWritten);
-    // Leave a torn tail: decoder must retain all four previous records.
+    record = entry(5);
+    record.kind = Kind::kPresets;
+    record.data = {0x24, 0x03, 0x7e, 0x04, 0x24, 0x03, 0x7e, 0x04};
+    record.context = 0;
+    seal(record);
+    CHECK(store.append(record) == AppendResult::kWritten);
+    record.sequence = 6;
+    record.context = static_cast<unsigned>(Context::kSit);
+    record.data[4] = 0x34;
+    seal(record);
+    CHECK(store.append(record) == AppendResult::kWritten);
+    record.sequence = 7;
+    record.context = static_cast<unsigned>(Context::kStand);
+    record.data = {0x34, 0x03, 0x7e, 0x04, 0x34, 0x03, 0x88, 0x04};
+    seal(record);
+    CHECK(store.append(record) == AppendResult::kWritten);
+    // Leave a torn tail: decoder must retain all seven previous records.
     flash.write_limit = 13;
-    CHECK(store.append(entry(5)) == AppendResult::kIoError);
+    CHECK(store.append(entry(8)) == AppendResult::kIoError);
     std::ofstream out(path, std::ios::binary);
     out.write(reinterpret_cast<const char*>(flash.bytes.data()), flash.bytes.size());
     CHECK(out.good());
@@ -280,6 +327,7 @@ int main(int argc, char** argv) {
         header_power_cuts();
         rotation_and_erase_cuts();
         invalid_capture_preserves_parser();
+        preset_changes_survive_mount();
     }
     return failures ? 1 : 0;
 }

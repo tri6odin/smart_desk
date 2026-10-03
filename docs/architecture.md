@@ -34,12 +34,11 @@ flowchart TD
 | `components/desk_controller/desk_recovery.cpp` | Блокировка, калибровка, ожидание высоты после RST |
 | `components/desk_journal` | Формат записей, дедупликация, очередь и flash-кольцо без зависимости от ESP-IDF |
 | `main/production_main.cpp` | Задачи и синхронизация production; единственный writer команд |
-| `main/ble_hid_logger.cpp`, `ble_bonds.cpp` | HID, жесты кнопок, поиск и привязки |
+| `main/ble_hid_host.cpp`, `ble_bonds.cpp` | HID, жесты кнопок, поиск и привязки |
 | `main/preset_store.cpp` | Чтение и сохранение SIT/STAND в NVS |
 | `main/uart_transport.cpp` | Настройка UART |
 | `main/persistent_journal.cpp` | ESP flash-адаптер и фоновая запись |
-| `main/runtime_diagnostics.cpp` | Последний диагностический снимок в RTC-памяти |
-| `main/app_main.cpp` | Только лабораторные режимы |
+| `main/app_main.cpp`, `lab_hid_trace.cpp` | Лабораторные режимы; live-HID вывод не включается в production |
 
 CMake выбирает одну точку входа. Чистые компоненты проверяются host-тестами;
 ESP-адаптеры требуют сборки и аппаратной проверки.
@@ -135,7 +134,7 @@ Recovery имеет приоритет над обычным движением 
 
 ```mermaid
 flowchart TD
-    Events["RX / TX / INVALID / TX_ERROR"] --> Dedup["Дедупликация отдельно для RX и TX"]
+    Events["RX / TX / INVALID / TX_ERROR / пресеты"] --> Dedup["Дедупликация отдельно для RX и TX"]
     Dedup --> Queue["Очередь RAM · 1024 записи"]
     Queue --> Worker["Фоновая задача записи"]
     Worker -->|"Append и проверка чтением"| Flash[("Flash-кольцо · 2 МиБ<br/>до 65 024 записей")]
@@ -156,9 +155,10 @@ flowchart TD
 
 
 NVS хранит пресеты и BLE bond. Отдельный раздел flash хранит
-[постоянный журнал](persistent-journal.md). RTC-снимок содержит последнее
-состояние, команду, высоту и сбой; он проверяется checksum и служит только
-диагностике. Сохранение RTC после снятия питания не гарантируется.
+[постоянный журнал](persistent-journal.md): при старте — текущие пресеты,
+после успешной перезаписи — прежние и новые значения. RTC-диагностика удалена.
+Production не содержит печати кадров, состояний и BLE-событий в консоль;
+консоль и платформенные логи отключены в конфигурации сборки.
 
 Supervisor раз в секунду проверяет успешные передачи writer и после трёх
 пропусков перезапускает ESP. Это не доказательство мгновенной остановки

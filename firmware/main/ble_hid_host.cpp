@@ -1,9 +1,12 @@
-#include "ble_hid_logger.hpp"
+#include "ble_hid_host.hpp"
 #include "ble_bonds.hpp"
+
+#if CONFIG_DESK_MODE_BLE_HID_LOGGER
+#include "lab_hid_trace.hpp"
+#endif
 
 #include <array>
 #include <atomic>
-#include <cstdio>
 #include <cstring>
 
 #include "desk_inputs.hpp"
@@ -13,7 +16,7 @@
 #include "esp_gattc_api.h"
 #include "esp_hid_common.h"
 #include "esp_hidh.h"
-#include "esp_log.h"
+#include "esp_err.h"
 #include "freertos/FreeRTOS.h"
 #include "freertos/event_groups.h"
 #include "freertos/task.h"
@@ -21,7 +24,6 @@
 
 namespace {
 
-constexpr char kTag[] = "d100h.logger";
 constexpr EventBits_t kScanParamsReady = BIT0;
 constexpr EventBits_t kScanFinished = BIT1;
 constexpr EventBits_t kOpenFinished = BIT2;
@@ -59,6 +61,9 @@ BleHidActionCallback g_action_callback = nullptr;
 void* g_action_callback_context = nullptr;
 
 void publish_action(BleHidActionType type, int value = 0) {
+#if CONFIG_DESK_MODE_BLE_HID_LOGGER
+    lab_hid_trace::action(type, value);
+#endif
     if (g_action_callback != nullptr) {
         g_action_callback(BleHidAction{type, value},
                           g_action_callback_context);
@@ -85,19 +90,9 @@ bool is_d100h_name(const char* name) {
            contains_text(name, "KEHWIN");
 }
 
-void format_address(const std::uint8_t* address, char* output,
-                    std::size_t output_size) {
-    std::snprintf(output, output_size, "%02X:%02X:%02X:%02X:%02X:%02X",
-                  address[0], address[1], address[2], address[3], address[4],
-                  address[5]);
-}
-
 void queue_forget_current_bond() {
     if (ble_bonds::queue_forget_connected()) {
-        ESP_LOGW(kTag, "ACTION STOP; forgetting current D100H bond");
         publish_action(BleHidActionType::kStop);
-    } else {
-        ESP_LOGW(kTag, "forget bond ignored: no connected D100H");
     }
 }
 
@@ -120,17 +115,13 @@ void configure_security() {
         ESP_BLE_SM_SET_RSP_KEY, &response_keys, sizeof(response_keys)));
 }
 
-void log_button_release(const char* name, TickType_t duration) {
+void publish_button_release(smart_desk::PresetButton button, TickType_t duration) {
     if (duration >= kLongPressThreshold) {
-        ESP_LOGW(kTag, "ACTION SAVE_%s (held %lu ms)", name,
-                 static_cast<unsigned long>(duration * portTICK_PERIOD_MS));
-        publish_action(std::strcmp(name, "SIT") == 0
+        publish_action(button == smart_desk::PresetButton::kSit
                            ? BleHidActionType::kSaveSit
                            : BleHidActionType::kSaveStand);
     } else {
-        ESP_LOGW(kTag, "ACTION GO_%s (held %lu ms)", name,
-                 static_cast<unsigned long>(duration * portTICK_PERIOD_MS));
-        publish_action(std::strcmp(name, "SIT") == 0
+        publish_action(button == smart_desk::PresetButton::kSit
                            ? BleHidActionType::kGoSit
                            : BleHidActionType::kGoStand);
     }
@@ -163,8 +154,6 @@ void record_dial_event(int direction) {
     taskEXIT_CRITICAL(&g_semantic_lock);
 
     if (reversal) {
-        ESP_LOGW(kTag,
-                 "ACTION STOP/CANCEL (dial reversal; discard until quiet)");
         publish_action(BleHidActionType::kStop);
     }
 }
@@ -188,7 +177,6 @@ void interpret_consumer_control(const std::uint8_t* bytes,
         cancelled = g_preset_buttons.cancel();
         taskEXIT_CRITICAL(&g_semantic_lock);
         if (cancelled) {
-            ESP_LOGW(kTag, "ACTION STOP (preset gesture interrupted)");
             publish_action(BleHidActionType::kUserActivity);
             publish_action(BleHidActionType::kStop);
             return;
@@ -207,7 +195,6 @@ void interpret_consumer_control(const std::uint8_t* bytes,
     }
     if (usage == 0x00E2) {
         publish_action(BleHidActionType::kUserActivity);
-        ESP_LOGW(kTag, "ACTION STOP (dial press)");
         publish_action(BleHidActionType::kStop);
         return;
     }
@@ -222,11 +209,8 @@ void interpret_consumer_control(const std::uint8_t* bytes,
             publish_action(BleHidActionType::kUserActivity);
         }
         if (result.chord_started) {
-            ESP_LOGW(kTag,
-                     "ACTION STOP (SIT+STAND); hold both 10 s for calibration");
             publish_action(BleHidActionType::kStop);
         }
-        ESP_LOGI(kTag, "SIT pressed");
         return;
     }
     if (usage == 0x00B5) {
@@ -240,11 +224,8 @@ void interpret_consumer_control(const std::uint8_t* bytes,
             publish_action(BleHidActionType::kUserActivity);
         }
         if (result.chord_started) {
-            ESP_LOGW(kTag,
-                     "ACTION STOP (SIT+STAND); hold both 10 s for calibration");
             publish_action(BleHidActionType::kStop);
         }
-        ESP_LOGI(kTag, "STAND pressed");
         return;
     }
     if (usage == kPlayPauseUsage) {
@@ -256,7 +237,6 @@ void interpret_consumer_control(const std::uint8_t* bytes,
         if (new_press) {
             publish_action(BleHidActionType::kUserActivity);
         }
-        ESP_LOGI(kTag, "PLAY/PAUSE pressed; hold 5 s to forget BLE bond");
         return;
     }
 
@@ -275,17 +255,15 @@ void interpret_consumer_control(const std::uint8_t* bytes,
     taskEXIT_CRITICAL(&g_semantic_lock);
 
     if (preset_release.sit_pressed && !preset_release.suppress_presets) {
-        log_button_release("SIT", preset_release.sit_duration);
+        publish_button_release(smart_desk::PresetButton::kSit, preset_release.sit_duration);
     }
     if (preset_release.stand_pressed && !preset_release.suppress_presets) {
-        log_button_release("STAND", preset_release.stand_duration);
+        publish_button_release(smart_desk::PresetButton::kStand, preset_release.stand_duration);
     }
     if (forget_bond) {
         queue_forget_current_bond();
     }
     if (preset_release.start_calibration) {
-        ESP_LOGW(kTag,
-                 "ACTION START_CALIBRATION (SIT+STAND held 10 s)");
         publish_action(BleHidActionType::kStartCalibration);
     }
 }
@@ -294,7 +272,6 @@ void semantic_timer_task(void*) {
     while (true) {
         int direction = 0;
         std::uint32_t count = 0;
-        bool rearmed_after_reversal = false;
         bool forget_bond = false;
         bool start_calibration = false;
 
@@ -307,7 +284,6 @@ void semantic_timer_task(void*) {
         if (g_dial_cancelled_until_quiet &&
             now - g_dial_last_tick >= kDialBurstQuietTime) {
             g_dial_cancelled_until_quiet = false;
-            rearmed_after_reversal = true;
         } else if (g_dial_event_count != 0 &&
             now - g_dial_last_tick >= kDialBurstQuietTime) {
             direction = g_dial_direction;
@@ -321,21 +297,12 @@ void semantic_timer_task(void*) {
             queue_forget_current_bond();
         }
         if (start_calibration) {
-            ESP_LOGW(kTag,
-                     "ACTION START_CALIBRATION (SIT+STAND held 10 s)");
             publish_action(BleHidActionType::kStartCalibration);
         }
         ble_bonds::process_requests();
 
-        if (rearmed_after_reversal) {
-            ESP_LOGI(kTag,
-                     "dial rearmed after quiet; new gesture required");
-        }
         if (count != 0 && g_publish_delayed_dial_delta) {
             const int delta = (count == 1 ? 1 : 3) * direction;
-            ESP_LOGW(kTag,
-                     "ACTION DIAL_DELTA=%+d cm (events=%lu)",
-                     delta, static_cast<unsigned long>(count));
             publish_action(BleHidActionType::kDialDelta, delta);
         }
         vTaskDelay(pdMS_TO_TICKS(20));
@@ -354,35 +321,18 @@ void hid_event(void*, esp_event_base_t, std::int32_t event_id,
                 g_connected.store(true);
                 ble_bonds::refresh();
                 const auto* address = esp_hidh_dev_bda_get(data->open.dev);
-                char address_text[18] = {};
                 if (address != nullptr) {
-                    format_address(address, address_text, sizeof(address_text));
                     ble_bonds::connected(address);
                 }
-                ESP_LOGW(kTag, "CONNECTED %s name='%s'", address_text,
-                         esp_hidh_dev_name_get(data->open.dev));
-                if (g_action_callback == nullptr) {
-                    ESP_LOGI(kTag,
-                             "HID dry-run enabled; desk stays IDLE");
-                } else {
-                    ESP_LOGW(kTag, "live HID action callback enabled");
-                }
-                esp_hidh_dev_dump(data->open.dev, stdout);
-            } else {
-                ESP_LOGE(kTag, "open failed: %s",
-                         esp_err_to_name(data->open.status));
             }
             xEventGroupSetBits(g_events, kOpenFinished);
             break;
         }
         case ESP_HIDH_INPUT_EVENT: {
-            ESP_LOGD(kTag,
-                     "INPUT usage=%s map=%u report_id=%u length=%u",
-                     esp_hid_usage_str(data->input.usage),
-                     data->input.map_index, data->input.report_id,
-                     data->input.length);
-            ESP_LOG_BUFFER_HEX_LEVEL(kTag, data->input.data,
-                                     data->input.length, ESP_LOG_DEBUG);
+#if CONFIG_DESK_MODE_BLE_HID_LOGGER
+            lab_hid_trace::report(data->input.report_id, data->input.data,
+                                  data->input.length);
+#endif
             if (data->input.usage == ESP_HID_USAGE_CCONTROL &&
                 data->input.report_id == 2) {
                 interpret_consumer_control(data->input.data,
@@ -391,21 +341,10 @@ void hid_event(void*, esp_event_base_t, std::int32_t event_id,
             break;
         }
         case ESP_HIDH_FEATURE_EVENT:
-            ESP_LOGI(kTag,
-                     "FEATURE usage=%s map=%u report_id=%u length=%u",
-                     esp_hid_usage_str(data->feature.usage),
-                     data->feature.map_index, data->feature.report_id,
-                     data->feature.length);
-            ESP_LOG_BUFFER_HEX_LEVEL(kTag, data->feature.data,
-                                     data->feature.length, ESP_LOG_INFO);
             break;
         case ESP_HIDH_BATTERY_EVENT:
-            ESP_LOGI(kTag, "battery=%u%% status=%s", data->battery.level,
-                     esp_err_to_name(data->battery.status));
             break;
         case ESP_HIDH_CLOSE_EVENT:
-            ESP_LOGW(kTag, "DISCONNECTED reason=%d", data->close.reason);
-            ESP_LOGW(kTag, "ACTION STOP (BLE disconnected)");
             reset_semantic_state();
             publish_action(BleHidActionType::kDisconnected);
             g_connected.store(false);
@@ -415,7 +354,6 @@ void hid_event(void*, esp_event_base_t, std::int32_t event_id,
             xEventGroupSetBits(g_events, kDisconnected);
             break;
         default:
-            ESP_LOGI(kTag, "HID event=%ld", static_cast<long>(event_id));
             break;
     }
 }
@@ -451,10 +389,6 @@ void inspect_advertisement(esp_ble_gap_cb_param_t::ble_scan_result_evt_param& re
     g_candidate_address_type = result.ble_addr_type;
     g_have_candidate.store(true);
 
-    char address_text[18] = {};
-    format_address(result.bda, address_text, sizeof(address_text));
-    ESP_LOGW(kTag, "candidate %s name='%s' RSSI=%d match=%s", address_text,
-             name, result.rssi, matched_bond ? "stored-bond" : "name");
     ESP_ERROR_CHECK_WITHOUT_ABORT(esp_ble_gap_stop_scanning());
 }
 
@@ -475,25 +409,14 @@ void gap_event(esp_gap_ble_cb_event_t event, esp_ble_gap_cb_param_t* data) {
             xEventGroupSetBits(g_events, kScanFinished);
             break;
         case ESP_GAP_BLE_SEC_REQ_EVT:
-            ESP_LOGI(kTag, "accepting BLE security request");
             esp_ble_gap_security_rsp(data->ble_security.ble_req.bd_addr, true);
             break;
         case ESP_GAP_BLE_AUTH_CMPL_EVT:
             if (data->ble_security.auth_cmpl.success) {
-                ESP_LOGI(kTag, "pairing/authentication successful");
                 ble_bonds::authenticated(data->ble_security.auth_cmpl.bd_addr);
-            } else {
-                ESP_LOGE(kTag, "pairing failed, reason=0x%02X",
-                         data->ble_security.auth_cmpl.fail_reason);
             }
             break;
         case ESP_GAP_BLE_REMOVE_BOND_DEV_COMPLETE_EVT:
-            if (data->remove_bond_dev_cmpl.status == ESP_BT_STATUS_SUCCESS) {
-                ESP_LOGW(kTag, "BLE bond removed");
-            } else {
-                ESP_LOGE(kTag, "BLE bond removal failed, status=%d",
-                         data->remove_bond_dev_cmpl.status);
-            }
             ble_bonds::removal_complete(
                 data->remove_bond_dev_cmpl.status == ESP_BT_STATUS_SUCCESS);
             break;
@@ -511,12 +434,8 @@ void scan_task(void*) {
         g_have_candidate.store(false);
         xEventGroupClearBits(g_events,
                              kScanFinished | kOpenFinished | kDisconnected);
-        ESP_LOGI(kTag, "scanning for Ulanzi/Dial BLE HID (%lu s)",
-                 static_cast<unsigned long>(kScanSeconds));
         const esp_err_t scan_result = esp_ble_gap_start_scanning(kScanSeconds);
         if (scan_result != ESP_OK) {
-            ESP_LOGE(kTag, "scan start failed: %s",
-                     esp_err_to_name(scan_result));
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
@@ -524,7 +443,6 @@ void scan_task(void*) {
         xEventGroupWaitBits(g_events, kScanFinished, pdTRUE, pdTRUE,
                             portMAX_DELAY);
         if (!g_have_candidate.load()) {
-            ESP_LOGI(kTag, "D100H not found; retrying");
             vTaskDelay(pdMS_TO_TICKS(500));
             continue;
         }
@@ -534,7 +452,6 @@ void scan_task(void*) {
                               ESP_HID_TRANSPORT_BLE,
                               g_candidate_address_type) == nullptr) {
             g_open_pending.store(false);
-            ESP_LOGE(kTag, "could not start HID connection");
             vTaskDelay(pdMS_TO_TICKS(1000));
             continue;
         }
@@ -554,7 +471,7 @@ void scan_task(void*) {
 
 }  // namespace
 
-void start_ble_hid_logger(BleHidActionCallback callback,
+void start_ble_hid_host(BleHidActionCallback callback,
                           void* callback_context,
                           bool publish_delayed_dial_delta) {
     g_action_callback = callback;
@@ -606,7 +523,6 @@ void start_ble_hid_logger(BleHidActionCallback callback,
     // D100H resumes a bonded session by connecting to the same controller
     // identity it paired with. Keep the ESP's public address stable: using an
     // RPA here made the remote advertise, but every open failed with HCI 0x3e.
-    ESP_LOGI(kTag, "using stable public BLE identity for bonded reconnect");
     xEventGroupSetBits(g_events, kPrivacyReady);
     ESP_ERROR_CHECK(xTaskCreate(scan_task, "d100h_scan", 6144, nullptr, 3,
                                nullptr) == pdPASS ? ESP_OK : ESP_ERR_NO_MEM);

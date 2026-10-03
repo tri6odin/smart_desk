@@ -2,14 +2,13 @@
 #include <atomic>
 #include <cstdint>
 
-#include "ble_hid_logger.hpp"
+#include "ble_hid_host.hpp"
 #include "desk_inputs.hpp"
 #include "desk_recovery.hpp"
 #include "preset_store.hpp"
 #include "persistent_journal.hpp"
-#include "runtime_diagnostics.hpp"
 #include "uart_transport.hpp"
-#include "esp_log.h"
+#include "esp_err.h"
 #include "esp_system.h"
 #include "esp_timer.h"
 #include "freertos/FreeRTOS.h"
@@ -79,8 +78,6 @@ void ble_motion_action(const BleHidAction& action, void*) {
 void reader_task(void*) {
     smart_desk::StreamParser parser(smart_desk::Direction::kControllerToPanel);
     std::array<std::uint8_t, 64> bytes{};
-    smart_desk::Frame last_frame{};
-    bool have_last_frame = false;
     while (true) {
         const int received =
             uart_read_bytes(UART_NUM_1, bytes.data(), bytes.size(), pdMS_TO_TICKS(100));
@@ -98,28 +95,6 @@ void reader_task(void*) {
             persistent_journal::receive(*frame);
             g_telemetry.receive(*frame, now_ms());
             portEXIT_CRITICAL(&g_inputs_mux);
-            if (smart_desk::classify_controller_frame(*frame) ==
-                smart_desk::ControllerFrameKind::kUnknown) {
-                runtime_diagnostics::fault(
-                    runtime_diagnostics::Fault::kUnknownControllerFrame);
-            }
-            if (!have_last_frame || *frame != last_frame) {
-                const auto kind = smart_desk::classify_controller_frame(*frame);
-                if (kind == smart_desk::ControllerFrameKind::kReset) {
-                    ESP_LOGW("desk.controller", "RST frame received");
-                } else if (kind ==
-                           smart_desk::ControllerFrameKind::kUnknown) {
-                    ESP_LOGE(
-                        "desk.controller",
-                        "%s valid frame; motion locked until successful RST",
-                        *frame == smart_desk::kObservedPowerOffFrame
-                            ? "POWER_OFF" : "unknown");
-                }
-                ESP_LOG_BUFFER_HEX_LEVEL("desk.controller", frame->data(),
-                                         frame->size(), ESP_LOG_INFO);
-                last_frame = *frame;
-                have_last_frame = true;
-            }
         }
     }
 }
@@ -131,8 +106,6 @@ bool transmit(smart_desk::Command command,
     const int written = uart_write_bytes(UART_NUM_1, frame.data(), frame.size());
     if (written != static_cast<int>(frame.size()) ||
         uart_wait_tx_done(UART_NUM_1, pdMS_TO_TICKS(50)) != ESP_OK) {
-        ESP_LOGE("desk.control", "UART TX failed: %d/8 bytes", written);
-        runtime_diagnostics::fault(runtime_diagnostics::Fault::kUartTransmit);
         persistent_journal::transmit_error(command);
         return false;
     }
@@ -142,6 +115,7 @@ bool transmit(smart_desk::Command command,
 
 void panel_writer_task(void*) {
     auto presets = smart_desk::load_presets(kControllerConfig);
+    persistent_journal::presets(presets.sit, presets.stand, presets.sit, presets.stand);
     auto controller_config = kControllerConfig;
     controller_config.sit_target_tenths_cm = presets.sit;
     controller_config.stand_target_tenths_cm = presets.stand;
@@ -153,9 +127,7 @@ void panel_writer_task(void*) {
     initial_input.dial_sequence = take_inputs().ble.dial_sequence;
     initial_input.stop_requested = true;
     controller.update(initial_input);
-    smart_desk::ControlState logged_state = controller.state();
     auto preset_context = smart_desk::journal::Context::kNone;
-    smart_desk::RecoveryState logged_recovery_state = recovery.state();
     TickType_t last_wake = xTaskGetTickCount();
 
     while (true) {
@@ -185,9 +157,8 @@ void panel_writer_task(void*) {
             sync_input.dial_sequence = dial.dial_sequence;
             sync_input.stop_requested = true;
             controller.update(sync_input);
-            logged_state = controller.state();
         }
-        // Send the safety override before logging or any preset NVS write.
+        // Send the safety override before any preset NVS write.
         // Recovery must never delay the first IDLE after an unexpected frame.
         if (recovery_output.override_motion ||
             recovery_output.suppress_normal_input) {
@@ -198,11 +169,6 @@ void panel_writer_task(void*) {
                 ? smart_desk::journal::Context::kCalibration
                 : smart_desk::journal::Context::kNone;
             if (transmit(recovery_output.command, context)) {
-                runtime_diagnostics::command(
-                    static_cast<std::uint32_t>(recovery_output.command),
-                    static_cast<std::uint32_t>(controller.state()),
-                    static_cast<std::uint32_t>(recovery_output.state),
-                    control_height);
                 g_panel_heartbeat.fetch_add(1);
                 if (recovery_output.command == smart_desk::Command::kIdle) {
                     persistent_journal::maintain_after_idle();
@@ -214,15 +180,6 @@ void panel_writer_task(void*) {
                 portEXIT_CRITICAL(&g_inputs_mux);
             }
             persistent_journal::cycle_completed(telemetry.unknown_frame_sequence);
-        }
-
-        if (recovery_output.reason != smart_desk::RecoveryReason::kNone ||
-            recovery_output.state != logged_recovery_state) {
-            ESP_LOGW("desk.recovery", "%s -> %s: %s",
-                     smart_desk::recovery_state_name(logged_recovery_state),
-                     smart_desk::recovery_state_name(recovery_output.state),
-                     smart_desk::recovery_reason_name(recovery_output.reason));
-            logged_recovery_state = recovery_output.state;
         }
 
         if (recovery_output.override_motion ||
@@ -239,7 +196,6 @@ void panel_writer_task(void*) {
                                   request == smart_desk::ButtonRequest::kSaveStand;
         if (controller.state() != smart_desk::ControlState::kIdle &&
             save_request) {
-            ESP_LOGW("desk.control", "button during motion -> STOP; action not queued");
             stop_requested = true;
             request = smart_desk::ButtonRequest::kNone;
         }
@@ -247,36 +203,25 @@ void panel_writer_task(void*) {
         if (controller.state() == smart_desk::ControlState::kIdle && !stop_requested &&
             (request == smart_desk::ButtonRequest::kSaveSit ||
              request == smart_desk::ButtonRequest::kSaveStand)) {
-            if (!control_fresh || !control_settled ||
-                control_height < controller.config().physical_min_tenths_cm ||
-                control_height > controller.config().physical_max_tenths_cm) {
-                ESP_LOGE("desk.control",
-                         "preset save BLOCKED: fresh=%d settled=%d height=%u.%u",
-                         control_fresh, control_settled, control_height / 10,
-                         control_height % 10);
-            } else {
+            if (control_fresh && control_settled &&
+                control_height >= controller.config().physical_min_tenths_cm &&
+                control_height <= controller.config().physical_max_tenths_cm) {
                 smart_desk::DeskPresets candidate = presets;
                 if (request == smart_desk::ButtonRequest::kSaveSit) {
                     candidate.sit = control_height;
                 } else {
                     candidate.stand = control_height;
                 }
-                if (!controller.valid_presets(candidate.sit, candidate.stand)) {
-                    ESP_LOGE(
-                        "desk.control",
-                        "preset save BLOCKED: require 72..118 cm and SIT+10<=STAND");
-                } else if (!smart_desk::save_presets(candidate, controller.config())) {
-                    ESP_LOGE("desk.control", "preset save failed in NVS");
-                } else if (!controller.set_presets(candidate.sit, candidate.stand)) {
-                    ESP_LOGE("desk.control",
-                             "internal preset validation disagrees with NVS");
-                } else {
+                if ((candidate.sit != presets.sit || candidate.stand != presets.stand) &&
+                    controller.valid_presets(candidate.sit, candidate.stand) &&
+                    smart_desk::save_presets(candidate, controller.config()) &&
+                    controller.set_presets(candidate.sit, candidate.stand)) {
+                    persistent_journal::presets(
+                        presets.sit, presets.stand, candidate.sit, candidate.stand,
+                        request == smart_desk::ButtonRequest::kSaveSit
+                            ? smart_desk::journal::Context::kSit
+                            : smart_desk::journal::Context::kStand);
                     presets = candidate;
-                    ESP_LOGW("desk.control",
-                             "saved SIT=%u.%u STAND=%u.%u cm; limits unchanged at "
-                             "72.0..118.0",
-                             presets.sit / 10, presets.sit % 10, presets.stand / 10,
-                             presets.stand % 10);
                 }
             }
             request = smart_desk::ButtonRequest::kNone;
@@ -311,16 +256,6 @@ void panel_writer_task(void*) {
         g_inputs.set_controller_state(controller.state(), controller.direction());
         portEXIT_CRITICAL(&g_inputs_mux);
 
-        if (controller_output.reason != smart_desk::TransitionReason::kNone ||
-            controller_output.state != logged_state) {
-            ESP_LOGW("desk.control", "%s -> %s: %s at %u.%u cm",
-                     smart_desk::control_state_name(logged_state),
-                     smart_desk::control_state_name(controller_output.state),
-                     smart_desk::transition_reason_name(controller_output.reason),
-                     control_height / 10, control_height % 10);
-            logged_state = controller_output.state;
-        }
-
         auto journal_context = smart_desk::journal::Context::kNone;
         if (controller_output.state == smart_desk::ControlState::kManualStep ||
             controller_output.state == smart_desk::ControlState::kManualHold) {
@@ -337,11 +272,6 @@ void panel_writer_task(void*) {
             controller_output.state == smart_desk::ControlState::kManualStep &&
             controller_output.reason == smart_desk::TransitionReason::kNone;
         if (transmit(controller_output.command, journal_context, routine_step_idle)) {
-            runtime_diagnostics::command(
-                static_cast<std::uint32_t>(controller_output.command),
-                static_cast<std::uint32_t>(controller_output.state),
-                static_cast<std::uint32_t>(recovery_output.state),
-                control_height);
             g_panel_heartbeat.fetch_add(1);
             if (controller_output.command == smart_desk::Command::kIdle &&
                 controller_output.state == smart_desk::ControlState::kIdle) {
@@ -373,11 +303,7 @@ void panel_watchdog_task(void*) {
         }
 
         ++missed_seconds;
-        ESP_LOGE("desk.watchdog", "panel writer heartbeat missing: %u s",
-                 missed_seconds);
         if (missed_seconds >= 3) {
-            ESP_LOGE("desk.watchdog", "panel writer stalled; restarting ESP");
-            runtime_diagnostics::fault(runtime_diagnostics::Fault::kWriterStalled);
             esp_restart();
         }
     }
@@ -386,11 +312,6 @@ void panel_watchdog_task(void*) {
 }  // namespace
 
 extern "C" void app_main() {
-    runtime_diagnostics::begin_boot();
-    ESP_LOGW("smart_desk", "BLE CONTROLLER; original panel must be disconnected");
-    ESP_LOGW("smart_desk", "SIT/STAND from NVS; limits=72..118 cm; no queue");
-    ESP_LOGI("smart_desk", "GPIO17=TX; GPIO18=height RX");
-
     configure_uart(UART_NUM_1, kTxGpio, kRxGpio);
     ESP_ERROR_CHECK(transmit(smart_desk::Command::kIdle) ? ESP_OK : ESP_FAIL);
     persistent_journal::begin();
@@ -398,7 +319,7 @@ extern "C" void app_main() {
     persistent_journal::start_worker();
     // BLE initialization owns NVS initialization. Start the writer afterwards
     // so its persisted preset read cannot race nvs_flash_init().
-    start_ble_hid_logger(ble_motion_action, nullptr, false);
+    start_ble_hid_host(ble_motion_action, nullptr, false);
     ESP_ERROR_CHECK(
         xTaskCreate(reader_task, "controller_rx", 4096, nullptr, 5, nullptr) == pdPASS
             ? ESP_OK

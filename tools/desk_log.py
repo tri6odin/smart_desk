@@ -72,7 +72,7 @@ def decode(blob):
             if raw == b"\xff" * RECORD_SIZE:
                 continue
             uptime, boot, sequence, data, kind, context, reserved, _ = RECORD.unpack(raw)
-            if reserved or kind not in range(1, 7) or not crc_ok(raw):
+            if reserved or kind not in range(1, 8) or not crc_ok(raw):
                 journal.invalid_records += 1
                 continue
             journal.events.append(Event(uptime, boot, sequence, data, kind, context))
@@ -86,6 +86,15 @@ def describe(event, raw_frames=False):
         return "BOOT", f"RESET={event.context} ELF_SHA256={data.hex()}"
     if event.kind == 6:
         return "LOGGER", f"GAP: {int.from_bytes(data, 'little')} queued records lost"
+    if event.kind == 7:
+        old_sit, old_stand, sit, stand = struct.unpack("<HHHH", data)
+        def cm(value):
+            return f"{value // 10}.{value % 10}"
+        if event.context == 2:
+            return "ESP", f"SAVE_SIT {cm(old_sit)} -> {cm(sit)} cm"
+        if event.context == 3:
+            return "ESP", f"SAVE_STAND {cm(old_stand)} -> {cm(stand)} cm"
+        return "ESP", f"PRESETS SIT={cm(sit)} cm STAND={cm(stand)} cm"
     if event.kind == 5:
         command = COMMANDS.get(data[5], f"0x{data[5]:02X}")
         return "ESP", f"TX_ERROR attempted={command}; delivery unknown; {hex_data}"

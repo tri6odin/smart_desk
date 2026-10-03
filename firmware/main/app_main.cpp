@@ -3,7 +3,7 @@
 #include <cstdint>
 
 #include "desk_protocol.hpp"
-#include "ble_hid_logger.hpp"
+#include "ble_hid_host.hpp"
 #include "driver/gpio.h"
 #include "uart_transport.hpp"
 #include "esp_log.h"
@@ -825,7 +825,7 @@ extern "C" void app_main() {
     xTaskCreate(reader_task, "controller_rx", 4096, &kEmulatorReader, 5,
                 nullptr);
     xTaskCreate(panel_writer_task, "idle_tx", 3072, nullptr, 5, nullptr);
-    start_ble_hid_logger();
+    start_ble_hid_host();
 #elif CONFIG_DESK_MODE_BLE_ONE_SHOT_TEST
     ESP_LOGW("smart_desk",
              "BLE ONE-SHOT MOTION TEST; original panel must be disconnected");
@@ -838,7 +838,7 @@ extern "C" void app_main() {
     xTaskCreate(reader_task, "controller_rx", 4096, &kEmulatorReader, 5,
                 nullptr);
     xTaskCreate(panel_writer_task, "panel_tx", 4096, nullptr, 5, nullptr);
-    start_ble_hid_logger(ble_motion_action, nullptr);
+    start_ble_hid_host(ble_motion_action, nullptr);
 #elif CONFIG_DESK_MODE_BLE_CALIBRATION
     ESP_LOGW("smart_desk",
              "BLE MULTI-RUN CALIBRATION; original panel must be disconnected");
@@ -851,7 +851,7 @@ extern "C" void app_main() {
     xTaskCreate(reader_task, "controller_rx", 4096, &kEmulatorReader, 5,
                 nullptr);
     xTaskCreate(panel_writer_task, "panel_tx", 5120, nullptr, 5, nullptr);
-    start_ble_hid_logger(ble_motion_action, nullptr);
+    start_ble_hid_host(ble_motion_action, nullptr);
 #else
 #error "Select a smart desk firmware mode"
 #endif

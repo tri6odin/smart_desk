@@ -13,6 +13,9 @@ void transmitted(smart_desk::Command command,
                  smart_desk::journal::Context context = smart_desk::journal::Context::kNone,
                  bool routine_step_idle = false);
 void transmit_error(smart_desk::Command command);
+void presets(std::uint16_t previous_sit, std::uint16_t previous_stand,
+             std::uint16_t sit, std::uint16_t stand,
+             smart_desk::journal::Context context = smart_desk::journal::Context::kNone);
 // Called after the writer has handled this telemetry snapshot, including
 // attempting the safety IDLE. Newer unknown frames keep persistence gated.
 void cycle_completed(std::uint32_t unknown_sequence);

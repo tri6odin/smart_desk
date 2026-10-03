@@ -12,10 +12,10 @@ Host-тестам нужны Python 3, CMake и C++-компилятор; чте
 
 ```sh
 cd firmware
-eim run 'idf.py -B build-journal -D IDF_TARGET=esp32s3 -D SDKCONFIG=sdkconfig.journal -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.ble-controller.defaults" build' v6.1
+eim run 'idf.py -B build-offline -D IDF_TARGET=esp32s3 -D SDKCONFIG=sdkconfig.offline -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.ble-controller.defaults" build' v6.1
 ```
 
-`build-journal` и `sdkconfig.journal` отделены от старых сборок. Сохранённый
+`build-offline` и `sdkconfig.offline` отделены от старых сборок. Сохранённый
 sdkconfig имеет приоритет над defaults: при переходе со старой конфигурации
 использовать новое имя, а не рассчитывать на автоматическую замену настроек.
 Production требует `partitions.journal.csv`; прежняя таблица вызовет ошибку CMake.
@@ -24,19 +24,20 @@ Production требует `partitions.journal.csv`; прежняя таблиц�
 штатная панель не подключена к TX ESP. Подставить текущий serial port:
 
 ```sh
-eim run 'idf.py -B build-journal -D IDF_TARGET=esp32s3 -D SDKCONFIG=sdkconfig.journal -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.ble-controller.defaults" -p /dev/cu.usbmodemXXXX flash' v6.1
+eim run 'idf.py -B build-offline -D IDF_TARGET=esp32s3 -D SDKCONFIG=sdkconfig.offline -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.ble-controller.defaults" -p /dev/cu.usbmodemXXXX flash' v6.1
 ```
 
 Первое обновление с журналом требует полного `flash`, включая таблицу разделов,
 а не `app-flash`. Обычный flash сохраняет NVS и журнал; **`erase-flash`
-удаляет журнал, пресеты и BLE bond**. После загрузки проверить отсутствие
-`persistent log unavailable`, подключение D100H и сохранённые цели.
+удаляет журнал, пресеты и BLE bond**. После загрузки проверить подключение
+D100H, сохранённые цели и новые BOOT/PRESETS в дампе журнала.
 
-USB-monitor с теми же параметрами сборки:
-
-```sh
-eim run 'idf.py -B build-journal -D SDKCONFIG=sdkconfig.journal -p /dev/cu.usbmodemXXXX monitor' v6.1
-```
+Production не выводит live-логи в USB: удалены печать UART/HID/состояний,
+RTC-диагностика и runtime-консоль; логи библиотек и bootloader отключены.
+Диагностика — чтение сохранённого flash-журнала через bootloader.
+Старая generated-конфигурация с консолью отклоняется CMake: использовать
+новые `sdkconfig.offline` / `build-offline`. ROM-вывод загрузки и обработка
+фатальных ошибок платформы не являются live-журналом приложения.
 
 Чтение истории после ошибки — [отдельная инструкция](../docs/persistent-journal.md).
 Версия с журналом установлена 2026-10-03, загрузка подтверждена, но
