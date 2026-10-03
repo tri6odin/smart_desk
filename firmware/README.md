@@ -1,84 +1,139 @@
 # Сборка и прошивка
 
-ESP-IDF **6.1**, target **esp32s3**, модуль **N16R8**. Команды ниже используют
-установленный ESP-IDF Installation Manager (`eim`) с окружением `v6.1`.
-Host-тестам нужны Python 3, CMake и C++-компилятор; чтению ESP — пакет esptool
-из окружения IDF. Локальный `eim_config.toml` создаётся установщиком
-для конкретного компьютера и не хранится в Git.
+Рабочая цель: ESP32-S3-WROOM-1-N16R8, ESP-IDF 6.1.
+Прошивка использует 16 МБ flash и не использует PSRAM.
+Команды не зависят от имени пользователя или каталога его ESP-IDF.
 
-## Production
+## Требования
 
-Из корня репозитория:
+| Задача | Инструменты |
+|---|---|
+| Проверки на компьютере | Python 3, CMake, компилятор C++17 |
+| Сборка ESP | ESP-IDF 6.1 для ESP32-S3 |
+| Запись и чтение flash | esptool из окружения ESP-IDF, USB-доступ к плате |
+| Сборка всех режимов скриптом проекта | ESP-IDF Installation Manager с командой eim и окружением v6.1 |
+
+Установите ESP-IDF по [инструкции Espressif](https://docs.espressif.com/projects/esp-idf/en/v6.1/esp32s3/get-started/index.html).
+Файл eim_config.toml относится к конкретному компьютеру.
+Он не хранится в Git.
+
+## Сборка рабочего режима
+
+Откройте терминал с активированным ESP-IDF 6.1.
+Из корня репозитория выполните:
+
+```sh
+cd firmware
+idf.py -B build-offline \
+  -D IDF_TARGET=esp32s3 \
+  -D SDKCONFIG=sdkconfig.offline \
+  -D SDKCONFIG_DEFAULTS='sdkconfig.defaults;sdkconfig.ble-controller.defaults' \
+  build
+```
+
+Если установлен EIM, используйте эквивалентную команду:
 
 ```sh
 cd firmware
 eim run 'idf.py -B build-offline -D IDF_TARGET=esp32s3 -D SDKCONFIG=sdkconfig.offline -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.ble-controller.defaults" build' v6.1
 ```
 
-`build-offline` и `sdkconfig.offline` отделены от старых сборок. Сохранённый
-sdkconfig имеет приоритет над defaults: при переходе со старой конфигурации
-использовать новое имя, а не рассчитывать на автоматическую замену настроек.
-Production требует `partitions.journal.csv`; прежняя таблица вызовет ошибку CMake.
+Созданный sdkconfig имеет приоритет над defaults.
+Для перехода со старой конфигурации используйте новое имя SDKCONFIG.
+Не ожидайте автоматической замены сохранённых настроек.
+CMake требует partitions.journal.csv, отключённую консоль и нулевой уровень логов.
+Неподходящая конфигурация завершает сборку с ошибкой.
 
-Перед прошивкой отключить **J8-1 → ESP 3V3**, подключить USB и убедиться, что
-штатная панель не подключена к TX ESP. Подставить текущий serial port:
+## Запись прошивки
+
+1. Остановите стол.
+2. Отсоедините J8-1 → ESP 3V3 по [инструкции подключения](../docs/esp32-board.md#подключение-для-usb).
+3. Проверьте отсутствие штатной панели на командной линии TX ESP.
+4. Подключите USB.
+5. Определите serial port платы.
+6. Из каталога firmware выполните команду ниже.
+
+Замените `/dev/cu.usbmodemXXXX` своим портом.
+На Linux имя обычно имеет вид `/dev/ttyACM0` или `/dev/ttyUSB0`.
+На Windows используется имя COM-порта.
 
 ```sh
-eim run 'idf.py -B build-offline -D IDF_TARGET=esp32s3 -D SDKCONFIG=sdkconfig.offline -D SDKCONFIG_DEFAULTS="sdkconfig.defaults;sdkconfig.ble-controller.defaults" -p /dev/cu.usbmodemXXXX flash' v6.1
+idf.py -B build-offline \
+  -D IDF_TARGET=esp32s3 \
+  -D SDKCONFIG=sdkconfig.offline \
+  -D SDKCONFIG_DEFAULTS='sdkconfig.defaults;sdkconfig.ble-controller.defaults' \
+  -p /dev/cu.usbmodemXXXX -b 115200 flash
 ```
 
-Первое обновление с журналом требует полного `flash`, включая таблицу разделов,
-а не `app-flash`. Обычный flash сохраняет NVS и журнал; **`erase-flash`
-удаляет журнал, пресеты и BLE bond**. После загрузки проверить подключение
-D100H, сохранённые цели и новые BOOT/PRESETS в дампе журнала.
+Команда flash записывает загрузчик, таблицу разделов и приложение.
+App-flash не обновляет таблицу разделов.
+Обычный flash не содержит образов NVS или desk_log.
+Завершённые записи, пресеты и привязка сохраняются.
+Erase-flash удаляет эти данные.
 
-Production не выводит live-логи в USB: удалены печать UART/HID/состояний,
-RTC-диагностика и runtime-консоль; логи библиотек и bootloader отключены.
-Диагностика — чтение сохранённого flash-журнала через bootloader.
-Старая generated-конфигурация с консолью отклоняется CMake: использовать
-новые `sdkconfig.offline` / `build-offline`. ROM-вывод загрузки и обработка
-фатальных ошибок платформы не являются live-журналом приложения.
+Esptool должен подтвердить проверку хэшей записанных образов.
+После перезапуска прочитайте журнал.
+Проверьте BOOT с идентификатором нового ELF и PRESETS с прежними настройками.
+Чтение описано в [инструкции диагностики](../docs/persistent-journal.md#чтение-через-usb).
+Для аппаратной проверки выполните [один прогон](../docs/single-run-test.md).
 
-Чтение истории после ошибки — [отдельная инструкция](../docs/persistent-journal.md).
-Версия с журналом установлена 2026-10-03, загрузка подтверждена, но
-[аппаратный прогон](../docs/verification-plan.md) ещё нужен.
+## Консоль
 
-## Автоматическая проверка
+Рабочая прошивка не выводит UART-кадры, HID-события или переходы состояний в USB.
+RTC-диагностика удалена.
+Логи ESP-IDF и загрузчика отключены конфигурацией.
+ROM-сообщения и сообщения фатальной ошибки платформы не являются live-журналом приложения.
+Лабораторный HID-вывод компилируется только для ble-logger.
 
-Из корня репозитория:
+## Проверки на компьютере
+
+Из корня репозитория выполните:
 
 ```sh
 python3 tools/check_firmware.py --sanitizers undefined
+```
+
+Скрипт выполняет шесть наборов: protocol, controller, inputs, BLE bonds, journal и decoder.
+Он не прошивает устройство.
+Полное сравнение сценариев с требованиями описано в [плане проверки](../docs/verification-plan.md).
+Прошедшие тесты не доказывают полноту журнала или безопасность механизма.
+
+Для сборки всех режимов через EIM выполните:
+
+```sh
 python3 tools/check_firmware.py --all-modes --fresh-configs --sanitizers undefined
 ```
 
-Первая команда выполняет шесть наборов: protocol, controller, inputs,
-BLE bonds, journal и Python-декодер. Вторая также собирает восемь режимов
-через EIM. `--fresh-configs` использует собственные `sdkconfig.check-*` и
-`build-check-*`, чтобы старые локальные настройки не влияли на результат.
-Скрипт ничего не прошивает. CI в `.github/workflows/firmware.yml` проверяет
-host-тесты и production-сборку.
+Fresh-configs использует собственные sdkconfig.check-* и build-check-*.
+Настройки других локальных сборок не влияют на результат.
+CI проверяет host-наборы и рабочую сборку ESP32-S3.
 
-## Режимы
+## Лабораторные режимы
 
-Режим задаётся Kconfig; имя каталога сборки само по себе его не выбирает.
-Базовый `sdkconfig.defaults` включает пассивный `read-only`. Для остальных
-добавляется `sdkconfig.<режим>.defaults`.
+Kconfig задаёт режим сборки.
+Имя каталога build само по себе режим не выбирает.
+Базовый sdkconfig.defaults выбирает read-only.
+Для остальных режимов добавляется соответствующий sdkconfig.<режим>.defaults.
 
-| Режим | Назначение и выход UART |
+| Режим | Назначение |
 |---|---|
-| `ble-controller` | Рабочее управление и постоянный журнал |
-| `read-only` | GPIO17/18 только RX; пассивное наблюдение обоих направлений |
-| `idle` | Только IDLE, проверка замены панели |
-| `step-down` | Один DOWN_STEP по BOOT при свежей высоте 110–120 см, затем блокировка до reset |
-| `hold-down` | Ограниченный защитами DOWN_HOLD по BOOT, затем блокировка до reset |
-| `ble-logger` | HID-диагностика, на UART только IDLE |
-| `ble-one-shot` | Один медленный BLE-жест через ограниченный HOLD за запуск |
-| `ble-calibration` | Лабораторные STEP и HOLD примерно на 3 см для измерения выбега |
+| ble-controller | Рабочее управление и постоянный журнал |
+| read-only | GPIO17 и GPIO18 работают только как RX |
+| idle | Передача только IDLE |
+| step-down | Один DOWN_STEP по BOOT при свежей высоте 110–120 см |
+| hold-down | Ограниченный защитами DOWN_HOLD по BOOT |
+| ble-logger | Вывод HID-данных; на UART только IDLE |
+| ble-one-shot | Один BLE-жест через ограниченный HOLD за запуск |
+| ble-calibration | Лабораторные STEP и HOLD примерно на 3 см для измерения выбега |
 
-`ble-calibration` — измерительный режим, **не** production-процедура RST.
-Все режимы, кроме `read-only`, включают TX: штатную панель нужно отсоединить.
-Лабораторные режимы не предназначены для повседневной эксплуатации.
+Все режимы, кроме read-only, включают TX.
+Отсоедините штатную панель перед их использованием.
+Ble-calibration измеряет выбег и не выполняет рабочую процедуру RST.
+Однократные тесты блокируют повторный запуск до перезапуска ESP.
 
-Код и зависимости модулей описаны в [архитектуре](../docs/architecture.md),
-параметры движения — в [управлении](../docs/ulanzi-d100h.md).
+## Учёт версии
+
+Сохраняйте commit, версию ESP-IDF и полный SHA-256 ELF для каждого аппаратного прогона.
+BOOT содержит только первые восемь байтов хэша.
+Записывайте результат прошивки отдельно от результата движения.
+Датированные установки приведены в [истории измерений](../docs/measurements.md).

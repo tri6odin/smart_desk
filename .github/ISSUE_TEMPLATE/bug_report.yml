@@ -1,0 +1,23 @@
+name: Ошибка
+description: Укажите версию, подключение и последовательность действий.
+title: ""
+body:
+  - type: textarea
+    id: version
+    attributes:
+      label: Версия и оборудование
+      description: Commit, ELF, модель ESP, питание USB или J8, пресеты.
+    validations:
+      required: true
+  - type: textarea
+    id: reproduce
+    attributes:
+      label: Действия и результат
+      description: Укажите последовательность, ожидаемый и фактический результат.
+    validations:
+      required: true
+  - type: textarea
+    id: evidence
+    attributes:
+      label: Наблюдения и журнал
+      description: Прикладывайте дамп только при согласии опубликовать историю движений и высот. Не публикуйте детали уязвимости.
