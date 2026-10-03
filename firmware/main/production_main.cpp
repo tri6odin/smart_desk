@@ -7,6 +7,7 @@
 #include "desk_recovery.hpp"
 #include "preset_store.hpp"
 #include "persistent_journal.hpp"
+#include "journal_motion.hpp"
 #include "uart_transport.hpp"
 #include "esp_err.h"
 #include "esp_system.h"
@@ -101,15 +102,16 @@ void reader_task(void*) {
 
 bool transmit(smart_desk::Command command,
               smart_desk::journal::Context context = smart_desk::journal::Context::kNone,
-              bool routine_step_idle = false) {
+              bool routine_step_idle = false,
+              smart_desk::journal::StopReason reason = smart_desk::journal::StopReason::kNone) {
     const auto frame = smart_desk::make_panel_frame(command);
     const int written = uart_write_bytes(UART_NUM_1, frame.data(), frame.size());
     if (written != static_cast<int>(frame.size()) ||
         uart_wait_tx_done(UART_NUM_1, pdMS_TO_TICKS(50)) != ESP_OK) {
-        persistent_journal::transmit_error(command);
+        persistent_journal::transmit_error(command, context, reason);
         return false;
     }
-    persistent_journal::transmitted(command, context, routine_step_idle);
+    persistent_journal::transmitted(command, context, routine_step_idle, reason);
     return true;
 }
 
@@ -148,6 +150,9 @@ void panel_writer_task(void*) {
         recovery_input.telemetry_stable_frames = telemetry.stable_frames;
         recovery_input.telemetry_fresh = telemetry.fresh;
         recovery_input.calibration_requested = dial.calibration_requested;
+        const auto previous_recovery_state = recovery.state();
+        const auto previous_state = controller.state();
+        const auto previous_context = journal_motion::context(previous_state, preset_context);
         const auto recovery_output = recovery.update(recovery_input);
         if (recovery_output.reset_motion_controller) {
             const auto current_config = controller.config();
@@ -165,10 +170,13 @@ void panel_writer_task(void*) {
             portENTER_CRITICAL(&g_inputs_mux);
             g_inputs.set_controller_state(smart_desk::ControlState::kIdle, 0);
             portEXIT_CRITICAL(&g_inputs_mux);
-            const auto context = recovery_output.state == smart_desk::RecoveryState::kCalibrating
+            const auto context = recovery_output.state == smart_desk::RecoveryState::kCalibrating ||
+                previous_recovery_state == smart_desk::RecoveryState::kCalibrating ||
+                previous_recovery_state == smart_desk::RecoveryState::kAwaitingTelemetry
                 ? smart_desk::journal::Context::kCalibration
-                : smart_desk::journal::Context::kNone;
-            if (transmit(recovery_output.command, context)) {
+                : previous_context;
+            if (transmit(recovery_output.command, context, false,
+                         journal_motion::reason(recovery_output.reason))) {
                 g_panel_heartbeat.fetch_add(1);
                 if (recovery_output.command == smart_desk::Command::kIdle) {
                     persistent_journal::maintain_after_idle();
@@ -271,7 +279,11 @@ void panel_writer_task(void*) {
         const bool routine_step_idle =
             controller_output.state == smart_desk::ControlState::kManualStep &&
             controller_output.reason == smart_desk::TransitionReason::kNone;
-        if (transmit(controller_output.command, journal_context, routine_step_idle)) {
+        if (controller_output.command == smart_desk::Command::kIdle) {
+            journal_context = previous_context;
+        }
+        if (transmit(controller_output.command, journal_context, routine_step_idle,
+                     journal_motion::motion_stop(previous_state, controller_output.reason))) {
             g_panel_heartbeat.fetch_add(1);
             if (controller_output.command == smart_desk::Command::kIdle &&
                 controller_output.state == smart_desk::ControlState::kIdle) {

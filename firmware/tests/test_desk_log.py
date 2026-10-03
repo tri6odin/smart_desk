@@ -18,7 +18,7 @@ class DecoderTests(unittest.TestCase):
             path = Path(directory) / "journal.bin"
             subprocess.run([WRITER, "--fixture", str(path)], check=True)
             journal = desk_log.decode(path.read_bytes())
-            self.assertEqual([e.sequence for e in journal.events], [1, 2, 3, 4, 5, 6, 7])
+            self.assertEqual([e.sequence for e in journal.events], list(range(1, 9)))
             self.assertEqual(journal.invalid_records, 1)
             text = desk_log.render(journal, 0, True)
             self.assertIn("UP_HOLD [dial]", text)
@@ -26,6 +26,7 @@ class DecoderTests(unittest.TestCase):
             self.assertIn("PRESETS SIT=80.4 cm STAND=115.0 cm", text)
             self.assertIn("SAVE_SIT 80.4 -> 82.0 cm", text)
             self.assertIn("SAVE_STAND 115.0 -> 116.0 cm", text)
+            self.assertIn("IDLE [STAND; STOP_REQUESTED]", text)
             self.assertIn("1193:02:47.", text)  # uptime does not wrap at 2^32 ms
             self.assertNotIn("DIAL_UP_START", text)
             self.assertNotIn("SETTLED", text)
@@ -33,7 +34,7 @@ class DecoderTests(unittest.TestCase):
             result = subprocess.run([sys.executable, str(ROOT / "tools/desk_log.py"),
                                      "--input", str(path), "--all"],
                                     capture_output=True, text=True, check=True)
-            self.assertIn("Stored: 7 records", result.stdout)
+            self.assertIn("Stored: 8 records", result.stdout)
 
     def test_empty_and_invalid_dump(self):
         self.assertEqual(desk_log.decode(b"\xff" * 8192).events, [])
@@ -50,6 +51,18 @@ class DecoderTests(unittest.TestCase):
         source, text = desk_log.describe(error)
         self.assertEqual(source, "ESP")
         self.assertIn("delivery unknown", text)
+
+    def test_stop_reason_metadata_and_old_tx(self):
+        idle = bytes.fromhex("AA 55 08 01 00 00 01 08")
+        for reason, name in desk_log.STOP_REASONS.items():
+            event = desk_log.Event(0, 1, 1, idle, 3, (reason << 3) | 3)
+            self.assertEqual(desk_log.describe(event), ("ESP -> DESK", f"IDLE [STAND; {name}]"))
+            self.assertIn(idle.hex(" ").upper(), desk_log.describe(event, True)[1])
+        old_idle = desk_log.Event(0, 1, 1, idle, 3, 0)
+        self.assertEqual(desk_log.describe(old_idle), ("ESP -> DESK", "IDLE"))
+        failed = desk_log.Event(0, 1, 1, idle, 5, (1 << 3) | 3)
+        self.assertIn("attempted=IDLE [STAND; STOP_REQUESTED]", desk_log.describe(failed)[1])
+        self.assertIn("delivery unknown", desk_log.describe(failed)[1])
 
     def test_partition_layout_matches_reader(self):
         lines = (ROOT / "firmware/partitions.journal.csv").read_text().splitlines()

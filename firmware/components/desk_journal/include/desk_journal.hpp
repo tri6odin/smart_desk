@@ -20,6 +20,25 @@ enum class Context : std::uint8_t {
     kNone = 0, kDial, kSit, kStand, kCalibration,
 };
 
+// Stable on-flash IDs, independent of the motion controller's enum order.
+// TX context: source in bits 0..2; IDLE reason in bits 3..7.
+enum class StopReason : std::uint8_t {
+    kNone = 0, kStopRequested = 1, kButtonDuringMotion = 2,
+    kDialReversal = 3, kDialOverride = 4, kDialReleased = 5,
+    kTelemetryStale = 6, kUnexpectedFrame = 7, kTelemetryReversed = 8,
+    kNoInitialMovement = 9, kHeightStalled = 10, kStepWatchdog = 11,
+    kTargetBrake = 12, kManualWatchdog = 13, kPresetWatchdog = 14,
+    kCalibrationCancelled = 15, kResetAcknowledged = 16,
+    kCalibrationTimeout = 17,
+};
+static_assert(static_cast<unsigned>(Context::kCalibration) < 8);
+static_assert(static_cast<unsigned>(StopReason::kCalibrationTimeout) < 32);
+
+constexpr std::uint8_t tx_context(Command command, Context source, StopReason reason) {
+    return static_cast<std::uint8_t>(source) |
+        (command == Command::kIdle ? static_cast<std::uint8_t>(reason) << 3 : 0);
+}
+
 // Fixed on-flash format. All integer fields are little endian on ESP32-S3.
 // CRC-32/ISO-HDLC covers bytes [0, 28); no pointers or dynamic strings.
 struct Record {
@@ -53,12 +72,14 @@ bool valid(const Record& record);
 bool valid(const SectorHeader& header);
 void seal(Record& record);
 
-// Only the actual previous value in each direction participates in dedup.
-// A suppressed STEP -> IDLE still updates the TX baseline.
+// RX compares the actual previous frame. TX compares the actual command and
+// remembers meaningful stop reasons, including cancellation after STEP's
+// suppressed pulse-ending IDLE. Routine IDLE never clears that reason.
 class Filter {
 public:
     bool receive(const Frame& frame, bool invalid = false);
-    bool transmit(Command command, bool routine_step_idle = false);
+    bool transmit(Command command, bool routine_step_idle = false,
+                  StopReason reason = StopReason::kNone);
     bool transmit_error(Command command);
 private:
     Frame last_rx_{};
@@ -67,6 +88,7 @@ private:
     Command last_tx_ = Command::kIdle;
     bool have_tx_ = false;
     bool last_tx_error_ = false;
+    StopReason last_stop_reason_ = StopReason::kNone;
 };
 
 // Pure capture/queue state. The adapter supplies uptime and serialization;
@@ -78,8 +100,10 @@ public:
                std::uint64_t now, const Frame& build, std::uint8_t reset_reason);
     void receive(const Frame& frame, std::uint64_t now, bool invalid = false);
     void transmitted(Command command, std::uint64_t now, Context context,
-                     bool routine_step_idle);
-    void transmit_error(Command command, std::uint64_t now);
+                     bool routine_step_idle, StopReason reason = StopReason::kNone);
+    void transmit_error(Command command, std::uint64_t now,
+                        Context context = Context::kNone,
+                        StopReason reason = StopReason::kNone);
     // Payload: previous SIT/STAND, new SIT/STAND (four little-endian u16).
     // Context none records the initial NVS snapshot. Saves log only changes.
     void presets(std::uint16_t previous_sit, std::uint16_t previous_stand,

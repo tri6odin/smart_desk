@@ -46,14 +46,19 @@ bool Filter::receive(const Frame& frame, bool invalid) {
     return true;
 }
 
-bool Filter::transmit(Command command, bool routine_step_idle) {
-    const bool changed = !have_tx_ || last_tx_error_ || command != last_tx_;
+bool Filter::transmit(Command command, bool routine_step_idle, StopReason reason) {
+    if (command != Command::kIdle) reason = StopReason::kNone;
+    const bool changed = !have_tx_ || last_tx_error_ || command != last_tx_ ||
+        (reason != StopReason::kNone && reason != last_stop_reason_);
     const bool step_idle = have_tx_ && !last_tx_error_ && command == Command::kIdle &&
         (last_tx_ == Command::kUpStep || last_tx_ == Command::kDownStep) &&
-        routine_step_idle;
+        routine_step_idle && reason == StopReason::kNone;
     last_tx_ = command;
     have_tx_ = true;
     last_tx_error_ = false;
+    if (command != Command::kIdle || reason != StopReason::kNone) {
+        last_stop_reason_ = reason;
+    }
     return changed && !step_idle;
 }
 
@@ -108,14 +113,17 @@ void Capture::receive(const Frame& frame, std::uint64_t now, bool invalid) {
 }
 
 void Capture::transmitted(Command command, std::uint64_t now, Context context,
-                          bool routine_step_idle) {
-    if (filter_.transmit(command, routine_step_idle)) {
-        enqueue(Kind::kTx, make_panel_frame(command), now, static_cast<std::uint8_t>(context));
+                          bool routine_step_idle, StopReason reason) {
+    if (filter_.transmit(command, routine_step_idle, reason)) {
+        enqueue(Kind::kTx, make_panel_frame(command), now, tx_context(command, context, reason));
     }
 }
 
-void Capture::transmit_error(Command command, std::uint64_t now) {
-    if (filter_.transmit_error(command)) enqueue(Kind::kTxError, make_panel_frame(command), now);
+void Capture::transmit_error(Command command, std::uint64_t now,
+                             Context context, StopReason reason) {
+    if (filter_.transmit_error(command)) {
+        enqueue(Kind::kTxError, make_panel_frame(command), now, tx_context(command, context, reason));
+    }
 }
 
 void Capture::presets(std::uint16_t previous_sit, std::uint16_t previous_stand,

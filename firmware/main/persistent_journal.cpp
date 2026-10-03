@@ -113,17 +113,18 @@ void receive(const smart_desk::Frame& frame, bool invalid) {
     portEXIT_CRITICAL(&g_queue_lock);
 }
 
-void transmitted(smart_desk::Command command, Context context, bool routine_step_idle) {
+void transmitted(smart_desk::Command command, Context context, bool routine_step_idle,
+                 StopReason reason) {
     if (!g_enabled) return;
     portENTER_CRITICAL(&g_queue_lock);
-    g_capture.transmitted(command, uptime_ms(), context, routine_step_idle);
+    g_capture.transmitted(command, uptime_ms(), context, routine_step_idle, reason);
     portEXIT_CRITICAL(&g_queue_lock);
 }
 
-void transmit_error(smart_desk::Command command) {
+void transmit_error(smart_desk::Command command, Context context, StopReason reason) {
     if (!g_enabled) return;
     portENTER_CRITICAL(&g_queue_lock);
-    g_capture.transmit_error(command, uptime_ms());
+    g_capture.transmit_error(command, uptime_ms(), context, reason);
     portEXIT_CRITICAL(&g_queue_lock);
 }
 

@@ -11,8 +11,11 @@ void start_worker();
 void receive(const smart_desk::Frame& frame, bool invalid = false);
 void transmitted(smart_desk::Command command,
                  smart_desk::journal::Context context = smart_desk::journal::Context::kNone,
-                 bool routine_step_idle = false);
-void transmit_error(smart_desk::Command command);
+                 bool routine_step_idle = false,
+                 smart_desk::journal::StopReason reason = smart_desk::journal::StopReason::kNone);
+void transmit_error(smart_desk::Command command,
+                    smart_desk::journal::Context context = smart_desk::journal::Context::kNone,
+                    smart_desk::journal::StopReason reason = smart_desk::journal::StopReason::kNone);
 void presets(std::uint16_t previous_sit, std::uint16_t previous_stand,
              std::uint16_t sit, std::uint16_t stand,
              smart_desk::journal::Context context = smart_desk::journal::Context::kNone);

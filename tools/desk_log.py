@@ -21,6 +21,14 @@ COMMANDS = {0: "IDLE", 1: "RECALL_STAND", 2: "RECALL_SIT", 3: "SAVE_STAND",
             4: "SAVE_SIT", 5: "DOWN_STEP", 6: "DOWN_HOLD", 7: "UP_STEP",
             8: "UP_HOLD", 14: "WAKE"}
 CONTEXTS = {1: "dial", 2: "SIT", 3: "STAND", 4: "calibration"}
+STOP_REASONS = {
+    1: "STOP_REQUESTED", 2: "BUTTON_DURING_MOTION", 3: "DIAL_REVERSAL",
+    4: "DIAL_OVERRIDE", 5: "DIAL_RELEASED", 6: "TELEMETRY_STALE",
+    7: "UNEXPECTED_FRAME", 8: "TELEMETRY_REVERSED", 9: "NO_INITIAL_MOVEMENT",
+    10: "HEIGHT_STALLED", 11: "STEP_WATCHDOG", 12: "TARGET_BRAKE",
+    13: "MANUAL_WATCHDOG", 14: "PRESET_WATCHDOG", 15: "CALIBRATION_CANCELLED",
+    16: "RST_RECEIVED", 17: "CALIBRATION_TIMEOUT",
+}
 RST = bytes.fromhex("55 AA 08 04 00 01 01 0C")
 STARTUP = bytes.fromhex("55 AA 08 0F 00 0F 01 25")
 # Exact frame observed during desk supply shutdown; diagnostic name only.
@@ -79,6 +87,17 @@ def decode(blob):
     return journal
 
 
+def tx_annotation(event):
+    parts = []
+    source = CONTEXTS.get(event.context & 7)
+    if source:
+        parts.append(source)
+    reason = event.context >> 3 if event.data[5] == 0 else 0
+    if reason:
+        parts.append(STOP_REASONS.get(reason, f"STOP_REASON_{reason}"))
+    return f" [{'; '.join(parts)}]" if parts else ""
+
+
 def describe(event, raw_frames=False):
     data = event.data
     hex_data = data.hex(" ").upper()
@@ -97,13 +116,12 @@ def describe(event, raw_frames=False):
         return "ESP", f"PRESETS SIT={cm(sit)} cm STAND={cm(stand)} cm"
     if event.kind == 5:
         command = COMMANDS.get(data[5], f"0x{data[5]:02X}")
-        return "ESP", f"TX_ERROR attempted={command}; delivery unknown; {hex_data}"
+        return "ESP", f"TX_ERROR attempted={command}{tx_annotation(event)}; delivery unknown; {hex_data}"
     if event.kind == 4:
         return "DESK -> ESP", f"INVALID {hex_data}"
     if event.kind == 3:
         text = COMMANDS.get(data[5], f"UNKNOWN 0x{data[5]:02X}")
-        if data[5] != 0 and event.context in CONTEXTS:
-            text += f" [{CONTEXTS[event.context]}]"
+        text += tx_annotation(event)
         return "ESP -> DESK", text + (f" | {hex_data}" if raw_frames else "")
     if data == RST:
         text = "RST"

@@ -1,4 +1,5 @@
 #include "desk_journal.hpp"
+#include "journal_motion.hpp"
 
 #include <algorithm>
 #include <cstring>
@@ -98,6 +99,18 @@ void filters() {
     CHECK(filter.transmit(Command::kIdle));  // transport recovered, same opcode
     CHECK(filter.transmit_error(Command::kUpStep));
     CHECK(filter.transmit(Command::kIdle, true));  // failed STEP is not a normal pulse
+
+    Filter step;
+    CHECK(step.transmit(Command::kUpStep));
+    CHECK(!step.transmit(Command::kIdle, true));
+    CHECK(step.transmit(Command::kIdle, false, StopReason::kStopRequested));
+    CHECK(!step.transmit(Command::kIdle));
+    CHECK(!step.transmit(Command::kIdle, false, StopReason::kStopRequested));
+    CHECK(step.transmit(Command::kIdle, false, StopReason::kUnexpectedFrame));
+    CHECK(!step.transmit(Command::kIdle));
+    CHECK(step.transmit(Command::kUpStep));  // new motion rearms the same reason
+    CHECK(!step.transmit(Command::kIdle, true));
+    CHECK(step.transmit(Command::kIdle, false, StopReason::kStopRequested));
 }
 
 void capture_order_gate_and_overflow() {
@@ -270,6 +283,86 @@ void preset_changes_survive_mount() {
     CHECK(saved[4].uptime_ms == 400);
 }
 
+void motion_stop_metadata() {
+    CHECK(journal_motion::motion_stop(ControlState::kIdle, TransitionReason::kStopRequested) == StopReason::kNone);
+    CHECK(journal_motion::motion_stop(ControlState::kDialClassify, TransitionReason::kStopRequested) == StopReason::kNone);
+    CHECK(journal_motion::motion_stop(ControlState::kManualStep, TransitionReason::kStepComplete) == StopReason::kNone);
+    CHECK(journal_motion::motion_stop(ControlState::kSettling, TransitionReason::kSettleWatchdog) == StopReason::kNone);
+    for (auto preset : {Context::kSit, Context::kStand}) {
+        DeskController controller;
+        ControllerInput input;
+        input.now_ms = 100;
+        input.height_tenths_cm = preset == Context::kSit ? 900 : 1000;
+        input.telemetry_fresh = input.telemetry_settled = true;
+        input.telemetry_stable_frames = 5;
+        input.request = preset == Context::kSit ? ControlRequest::kGoSit : ControlRequest::kGoStand;
+        const auto moving = controller.update(input);
+        CHECK(moving.state == ControlState::kPresetHold);
+        Capture capture;
+        capture.begin(1, 0, 0, {}, 1);
+        capture.transmitted(moving.command, 100, preset, false);
+        const auto previous = controller.state();
+        const auto source = journal_motion::context(previous, preset);
+        input.now_ms = 200;
+        input.request = ControlRequest::kNone;
+        input.stop_requested = true;
+        const auto stopped = controller.update(input);
+        CHECK(stopped.command == Command::kIdle);
+        const auto reason = journal_motion::motion_stop(previous, stopped.reason);
+        CHECK(reason == StopReason::kStopRequested);
+        capture.transmitted(stopped.command, 200, source, false, reason);
+        capture.transmitted(Command::kIdle, 300, Context::kNone, false);
+        const auto boot = capture.take(400);
+        const auto motion = capture.take(400);
+        const auto stop = capture.take(400);
+        CHECK(boot && motion && stop);
+        CHECK(stop && stop->context == tx_context(Command::kIdle, preset, reason));
+        CHECK(stop && stop->data == make_panel_frame(Command::kIdle));
+        CHECK(!capture.take(400));  // annotation does not flood repeated IDLE
+    }
+
+    DeskController controller;
+    ControllerInput input;
+    input.now_ms = 100;
+    input.height_tenths_cm = 1000;
+    input.telemetry_fresh = input.telemetry_settled = true;
+    input.telemetry_stable_frames = 5;
+    input.request = ControlRequest::kGoStand;
+    CHECK(controller.update(input).command == Command::kUpHold);
+    input.request = ControlRequest::kNone;
+    input.height_tenths_cm = 1125;  // 115.0 minus 2.5 cm coast
+    input.now_ms = 200;
+    const auto brake = controller.update(input);
+    CHECK(brake.command == Command::kIdle);
+    CHECK(journal_motion::reason(brake.reason) == StopReason::kTargetBrake);
+
+    DeskRecoveryController recovery;
+    RecoveryInput recovery_input;
+    recovery_input.unknown_frame_sequence = 1;
+    const auto fault = recovery.update(recovery_input);
+    CHECK(fault.command == Command::kIdle && fault.override_motion);
+    CHECK(journal_motion::reason(fault.reason) == StopReason::kUnexpectedFrame);
+    recovery_input.calibration_requested = true;
+    CHECK(recovery.update(recovery_input).command == Command::kDownHold);
+    recovery_input.calibration_requested = false;
+    recovery_input.reset_frame_sequence = 1;
+    const auto rst = recovery.update(recovery_input);
+    CHECK(rst.command == Command::kIdle);
+    CHECK(journal_motion::reason(rst.reason) == StopReason::kResetAcknowledged);
+
+    CHECK(tx_context(Command::kUpHold, Context::kStand, StopReason::kStopRequested) == 3);
+    Capture capture;
+    capture.begin(1, 0, 0, {}, 1);
+    capture.transmit_error(Command::kIdle, 100, Context::kStand, StopReason::kStopRequested);
+    capture.transmitted(Command::kIdle, 200, Context::kStand, false, StopReason::kStopRequested);
+    const auto boot = capture.take(300);
+    CHECK(boot && boot->kind == Kind::kBoot);
+    const auto error = capture.take(300);
+    const auto success = capture.take(300);
+    CHECK(error && error->kind == Kind::kTxError && error->context == 11);
+    CHECK(success && success->kind == Kind::kTx && success->context == 11);
+}
+
 void fixture(const char* path) {
     MemoryFlash flash;
     Store store(flash);
@@ -309,9 +402,15 @@ void fixture(const char* path) {
     record.data = {0x34, 0x03, 0x7e, 0x04, 0x34, 0x03, 0x88, 0x04};
     seal(record);
     CHECK(store.append(record) == AppendResult::kWritten);
-    // Leave a torn tail: decoder must retain all seven previous records.
+    record.sequence = 8;
+    record.kind = Kind::kTx;
+    record.context = tx_context(Command::kIdle, Context::kStand, StopReason::kStopRequested);
+    record.data = make_panel_frame(Command::kIdle);
+    seal(record);
+    CHECK(store.append(record) == AppendResult::kWritten);
+    // Leave a torn tail: decoder must retain all eight previous records.
     flash.write_limit = 13;
-    CHECK(store.append(entry(8)) == AppendResult::kIoError);
+    CHECK(store.append(entry(9)) == AppendResult::kIoError);
     std::ofstream out(path, std::ios::binary);
     out.write(reinterpret_cast<const char*>(flash.bytes.data()), flash.bytes.size());
     CHECK(out.good());
@@ -328,6 +427,7 @@ int main(int argc, char** argv) {
         rotation_and_erase_cuts();
         invalid_capture_preserves_parser();
         preset_changes_survive_mount();
+        motion_stop_metadata();
     }
     return failures ? 1 : 0;
 }
