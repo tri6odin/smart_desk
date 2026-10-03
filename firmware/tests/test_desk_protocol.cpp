@@ -135,6 +135,10 @@ void test_controller_service_frame_classification() {
     CHECK(classify_controller_frame(height) == ControllerFrameKind::kHeight);
     CHECK(classify_controller_frame(startup) == ControllerFrameKind::kStartup);
     CHECK(classify_controller_frame(reset) == ControllerFrameKind::kReset);
+    CHECK(is_valid_frame(kObservedPowerOffFrame, Direction::kControllerToPanel));
+    // Naming a measured shutdown frame must not bypass the recovery latch.
+    CHECK(classify_controller_frame(kObservedPowerOffFrame) ==
+          ControllerFrameKind::kUnknown);
     CHECK(classify_controller_frame(unknown) == ControllerFrameKind::kUnknown);
     CHECK(classify_controller_frame(malformed_reset) ==
           ControllerFrameKind::kUnknown);

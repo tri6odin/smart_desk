@@ -10,6 +10,11 @@ namespace smart_desk {
 constexpr std::size_t kFrameSize = 8;
 using Frame = std::array<std::uint8_t, kFrameSize>;
 
+// Observed twice when the desk supply was switched off. This diagnostic
+// name does not relax the unknown-frame recovery policy.
+inline constexpr Frame kObservedPowerOffFrame{0x55, 0xAA, 0x08, 0x03,
+                                              0x08, 0x00, 0x01, 0x12};
+
 enum class Direction {
     kPanelToController,
     kControllerToPanel,

@@ -111,7 +111,9 @@ void reader_task(void*) {
                            smart_desk::ControllerFrameKind::kUnknown) {
                     ESP_LOGE(
                         "desk.controller",
-                        "unknown valid frame; motion locked until successful RST");
+                        "%s valid frame; motion locked until successful RST",
+                        *frame == smart_desk::kObservedPowerOffFrame
+                            ? "POWER_OFF" : "unknown");
                 }
                 ESP_LOG_BUFFER_HEX_LEVEL("desk.controller", frame->data(),
                                          frame->size(), ESP_LOG_INFO);

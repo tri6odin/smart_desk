@@ -59,6 +59,15 @@ class DecoderTests(unittest.TestCase):
         self.assertEqual(int(entries["factory"][3], 0), 0x10000)
         self.assertEqual(int(entries["factory"][4], 0), 0x177000)
 
+    def test_power_off_is_an_exact_diagnostic_match(self):
+        event = desk_log.Event(0, 1, 1, desk_log.POWER_OFF, 2, 0)
+        self.assertEqual(desk_log.describe(event), ("DESK -> ESP", "POWER_OFF"))
+        self.assertIn("55 AA 08 03 08 00 01 12", desk_log.describe(event, True)[1])
+        # Other checksum-valid type-03 statuses remain unknown.
+        nearby = bytes.fromhex("55 AA 08 03 09 00 01 13")
+        event = desk_log.Event(0, 1, 2, nearby, 2, 0)
+        self.assertIn("UNKNOWN", desk_log.describe(event)[1])
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -23,6 +23,8 @@ COMMANDS = {0: "IDLE", 1: "RECALL_STAND", 2: "RECALL_SIT", 3: "SAVE_STAND",
 CONTEXTS = {1: "dial", 2: "SIT", 3: "STAND", 4: "calibration"}
 RST = bytes.fromhex("55 AA 08 04 00 01 01 0C")
 STARTUP = bytes.fromhex("55 AA 08 0F 00 0F 01 25")
+# Exact frame observed during desk supply shutdown; diagnostic name only.
+POWER_OFF = bytes.fromhex("55 AA 08 03 08 00 01 12")
 
 
 @dataclass(frozen=True)
@@ -98,6 +100,8 @@ def describe(event, raw_frames=False):
         text = "RST"
     elif data == STARTUP:
         text = "STARTUP"
+    elif data == POWER_OFF:
+        text = "POWER_OFF"
     elif data[3] == 2:
         height = ((data[4] & 0x3f) << 8) | data[5]
         text = f"HEIGHT {height // 10}.{height % 10} cm"
