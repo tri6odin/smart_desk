@@ -23,3 +23,12 @@ firmware/sdkconfig.*
 
 # Machine-specific ESP-IDF Installation Manager settings
 /eim_config.toml
+
+# Local credentials
+.env
+.env.*
+!.env.example
+secrets.yaml
+secrets.yml
+!secrets.example.yaml
+!secrets.example.yml
